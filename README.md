@@ -16,7 +16,7 @@ This repository accompanies the research project *“Enhancing Multimodal Speech
 The study proposes a **hybrid multimodal framework** integrating **acoustic** and **linguistic** representations through a **Compact Conformer** encoder for temporal modeling and a **Graph Attention Network (GAT)** for inter-modal reasoning.  
 Explainability is achieved via **attention visualization**, **SHAP**, and **Integrated Gradients**, allowing interpretability of model decisions.
 
-Our goal is to contribute an interpretable and reproducible multimodal SER architecture toward submission to **IJCAI 2026**.
+Our goal is to contribute an interpretable and reproducible multimodal SER architecture toward submission to **ACIIDS 2026**.
 
 ---
 
@@ -70,7 +70,7 @@ Configuration files for all experiments are provided under `/configs/`.
 | Phase I | Dataset Preparation & EDA | Sep 2025 | ✅ Completed |
 | Phase II | Model Architecture Design (Conformer–GAT) | Oct 2025 | 🟠 Ongoing |
 | Phase III | Training, Ablation & XAI Evaluation | Nov–Dec 2025 | ⏳ Pending |
-| Phase IV | Paper Writing & Submission (IJCAI 2026) | Jan–Feb 2026 | ⏳ Planned |
+| Phase IV | Paper Writing & Submission (ACIIDS 2026) | Jan–Feb 2026 | ⏳ Planned |
 
 ---
 
@@ -99,10 +99,10 @@ If you find this work useful, please cite:
 ```bibtex
 @misc{SpeedyLabX2025SER,
   title        = {Enhancing Multimodal Speech Emotion Recognition via a Conformer–GAT Fusion Architecture with Explainable AI},
-  author       = {Le Nguyen Gia Hung and Hoang Pham Gia Bao and Vo Tan Phat},
+  author       = {Le Nguyen Gia Hung and Hoang Pham Gia Bao, Vo Tan Phat, Le Nguyen Thien Danh and Thu Le},
   organization = {SpeedyLabX Research Group, FPT University},
   year         = {2025},
-  note         = {Work in progress, Target: IJCAI 2026}
+  note         = {Work in progress, Target: ACIIDS 2026}
 }
 ```
 
@@ -112,13 +112,15 @@ If you find this work useful, please cite:
 
 **SpeedyLabX Research Group — FPT University**
 
-| Member                 | Role                                 | GitHub                                           |
-| :--------------------- | :----------------------------------- | :----------------------------------------------- |
-| **Le Nguyen Gia Hung** | Audio Modeling · Fusion Design · XAI | [@hei1sme](https://github.com/hei1sme)           |
-| **Hoang Pham Gia Bao** | Text Modeling · Research Writing     | [@BAOHOANG2005](https://github.com/BAOHOANG2005) |
-| **Vo Tan Phat**        | Evaluation · Benchmarking            | [@FappLord](https://github.com/FappLord)         |
+| Member                    | Role                                 | GitHub                                           |
+| :-------------------------| :----------------------------------- | :----------------------------------------------- |
+| **Hoang Pham Gia Bao**    | Audio Modeling · Fusion Design · XAI | [@BAOHOANG2005](https://github.com/BAOHOANG2005) |
+| **Le Nguyen Gia Hung**    | Text Modeling · Research Writing     | [@hei1sme](https://github.com/hei1sme)           |
+| **Vo Tan Phat**           | Evaluation · Benchmarking            | [@FappLord](https://github.com/FappLord)         |
+| **Le Nguyen Thien Danh**  | Evaluation · Benchmarking            | [@TBA](https://github.com/TBA)                   |
 
-**Academic Mentor:** *Ms. Minh Thư*
+
+**Academic Mentor:** *Ms. Thu Le*
 We sincerely thank our mentor for continuous guidance and insightful feedback throughout this study.
 
 ---

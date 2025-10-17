@@ -1,0 +1,7 @@
+name: Feature Request
+description: Propose a feature
+body:
+  - type: textarea
+    id: value
+    attributes: { label: Value / Rationale }
+    validations: { required: true }

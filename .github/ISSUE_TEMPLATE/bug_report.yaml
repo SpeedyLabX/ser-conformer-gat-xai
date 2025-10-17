@@ -1,0 +1,10 @@
+name: Bug Report
+description: Report a bug
+body:
+  - type: textarea
+    id: desc
+    attributes: { label: Describe the bug }
+    validations: { required: true }
+  - type: input
+    id: repro
+    attributes: { label: Minimal Repro (commit/branch) }

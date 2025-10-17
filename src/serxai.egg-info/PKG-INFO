@@ -1,0 +1,24 @@
+Metadata-Version: 2.4
+Name: serxai
+Version: 0.1.0
+Summary: Multimodal SER with Conformer–GAT fusion + XAI
+Requires-Python: >=3.10
+License-File: LICENSE
+Requires-Dist: torch>=2.2
+Requires-Dist: torchaudio>=2.2
+Requires-Dist: transformers>=4.44
+Requires-Dist: huggingface-hub>=0.24
+Requires-Dist: numpy
+Requires-Dist: scikit-learn
+Requires-Dist: pyyaml
+Requires-Dist: tqdm
+Requires-Dist: matplotlib
+Requires-Dist: networkx
+Provides-Extra: dev
+Requires-Dist: pytest; extra == "dev"
+Requires-Dist: pytest-cov; extra == "dev"
+Requires-Dist: ruff; extra == "dev"
+Requires-Dist: black; extra == "dev"
+Requires-Dist: pre-commit; extra == "dev"
+Requires-Dist: dvc[gdrive,s3]>=3.50; extra == "dev"
+Dynamic: license-file

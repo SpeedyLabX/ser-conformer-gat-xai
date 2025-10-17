@@ -144,4 +144,3 @@ See the [LICENSE](LICENSE) file for the full legal text.
     <img src="https://licensebuttons.net/l/by-nc/4.0/88x31.png" alt="CC BY-NC 4.0">
   </a>
 </p>
-```

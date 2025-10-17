@@ -1,0 +1,14 @@
+name: Train-Sanity
+on:
+  workflow_dispatch:
+jobs:
+  train-sanity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - run: pip install -e .[dev]
+      - name: Dry-run (tiny epoch on toy split)
+        run: |
+          python -m src.cli.train --config configs/iemocap.yaml --dry-run --override trainer.epochs=1

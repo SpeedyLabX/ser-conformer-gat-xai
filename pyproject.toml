@@ -1,0 +1,26 @@
+[project]
+name = "serxai"
+version = "0.1.0"
+description = "Multimodal SER with Conformer–GAT fusion + XAI"
+requires-python = ">=3.10"
+dependencies = [
+  "torch>=2.2",
+  "torchaudio>=2.2",
+  "transformers>=4.44",
+  "huggingface-hub>=0.24",
+  "numpy",
+  "scikit-learn",
+  "pyyaml",
+  "tqdm",
+  "matplotlib",
+  "networkx",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-cov", "ruff", "black", "pre-commit", "dvc[gdrive,s3]>=3.50"]
+
+[tool.black]
+line-length = 100
+
+[tool.ruff]
+line-length = 100

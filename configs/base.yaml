@@ -1,0 +1,38 @@
+seed: 2025
+device: "cuda"
+trainer:
+  epochs: 50
+  batch_size: 16
+  lr: 3e-4
+  weight_decay: 1e-4
+  grad_clip: 1.0
+  patience: 7
+model:
+  audio:
+    backbone: "wavlm-base"
+    conformer_layers: 3
+    conformer_dim: 512
+    dropout: 0.1
+  text:
+    backbone: "roberta-base"
+    proj_dim: 512
+    dropout: 0.1
+  fusion:
+    gat_heads: 4
+    gat_layers: 2
+    gat_hidden: 256
+    bigru_hidden: 256
+    pooling: "max"
+  loss:
+    type: "focal"
+    gamma: 2.0
+    class_weights: null
+data:
+  dataset: "iemocap"
+  root: "data/iemocap"
+  num_workers: 4
+  split: {train: 0.7, val: 0.15, test: 0.15}
+  alignment: "cross_modal_attention"
+metrics: ["wa", "ua", "f1_macro", "cm"]
+artifacts_dir: "artifacts"
+log_dir: "experiments/runs"

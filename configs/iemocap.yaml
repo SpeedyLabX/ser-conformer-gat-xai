@@ -1,0 +1,6 @@
+extends: base.yaml
+data:
+  root: "data/iemocap"
+trainer:
+  epochs: 80
+  batch_size: 8

@@ -1,0 +1,6 @@
+extends: base.yaml
+data:
+  root: "data/meld"
+trainer:
+  epochs: 60
+  batch_size: 16

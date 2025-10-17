@@ -1,0 +1,22 @@
+# python
+.venv/
+__pycache__/
+*.pyc
+
+# experiments / artifacts
+experiments/runs/
+artifacts/
+outputs/
+logs/
+
+# data
+data/
+*.zip
+*.tar
+*.tar.gz
+*.pt
+*.ckpt
+
+# dvc
+.dvc/
+*.dvc

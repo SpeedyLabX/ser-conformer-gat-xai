@@ -20,3 +20,5 @@ data/
 # dvc
 .dvc/
 *.dvc
+
+docs/PRIVATE_DOCS/

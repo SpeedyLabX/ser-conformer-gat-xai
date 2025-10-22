@@ -83,6 +83,7 @@ def main():
     p.add_argument('--early_stopping_patience', type=int, default=0, help='Enable early stopping with this patience (0 disables)')
     p.add_argument('--max_train_samples', type=int, default=0, help='Limit number of training samples (0 = use all)')
     p.add_argument('--max_val_samples', type=int, default=0, help='Limit number of validation samples (0 = use all)')
+    p.add_argument('--use_tqdm', action='store_true', help='Enable tqdm progress bars in fallback loop')
     args = p.parse_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() and not args.cpu else 'cpu')
@@ -118,6 +119,14 @@ def main():
             from torch.utils.data import DataLoader
             from torch.optim import AdamW
             import math
+            # optional tqdm
+            if getattr(args, 'use_tqdm', False):
+                try:
+                    from tqdm.auto import tqdm
+                except Exception:
+                    tqdm = None
+            else:
+                tqdm = None
             use_fp16 = args.fp16 and device.type == 'cuda'
             scaler = torch.cuda.amp.GradScaler(enabled=use_fp16)
 
@@ -130,7 +139,10 @@ def main():
             total_steps = 0
             for epoch in range(args.epochs):
                 running_loss = 0.0
-                for step, batch in enumerate(train_loader):
+                iterator = enumerate(train_loader)
+                if tqdm is not None:
+                    iterator = tqdm(enumerate(train_loader), total=len(train_loader), desc=f'Epoch {epoch+1}/{args.epochs}')
+                for step, batch in iterator:
                     # move tensors to device but keep labels handling separate
                     labels = batch.get('labels')
                     input_batch = {k: v.to(device, non_blocking=True) for k, v in batch.items() if k != 'labels'}
@@ -187,7 +199,10 @@ def main():
                 correct = 0
                 total = 0
                 with torch.no_grad():
-                    for vb in val_loader:
+                    v_iter = val_loader
+                    if tqdm is not None:
+                        v_iter = tqdm(val_loader, total=len(val_loader), desc='Validation')
+                    for vb in v_iter:
                         vb = {k: v.to(device) for k, v in vb.items()}
                         out = model(**{k: v for k, v in vb.items() if k!='labels'})
                         logits = out.logits

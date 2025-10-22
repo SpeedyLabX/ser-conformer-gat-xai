@@ -81,6 +81,8 @@ def main():
     p.add_argument('--load_best_model_at_end', action='store_true', help='If set, load best model at end by metric')
     p.add_argument('--gradient_checkpointing', action='store_true', help='Enable model gradient checkpointing to save memory')
     p.add_argument('--early_stopping_patience', type=int, default=0, help='Enable early stopping with this patience (0 disables)')
+    p.add_argument('--max_train_samples', type=int, default=0, help='Limit number of training samples (0 = use all)')
+    p.add_argument('--max_val_samples', type=int, default=0, help='Limit number of validation samples (0 = use all)')
     args = p.parse_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() and not args.cpu else 'cpu')
@@ -97,8 +99,19 @@ def main():
             except Exception:
                 # older HF models may not have this API, ignore gracefully
                 pass
-        train_ds = ManifestDataset(train_records[:1000], tokenizer, max_length=args.max_length)
-        val_ds = ManifestDataset(val_records[:200], tokenizer, max_length=args.max_length)
+        # allow quick smoke runs by limiting samples; 0 means use all
+        if args.max_train_samples and args.max_train_samples > 0:
+            train_slice = train_records[: args.max_train_samples]
+        else:
+            train_slice = train_records
+
+        if args.max_val_samples and args.max_val_samples > 0:
+            val_slice = val_records[: args.max_val_samples]
+        else:
+            val_slice = val_records
+
+        train_ds = ManifestDataset(train_slice, tokenizer, max_length=args.max_length)
+        val_ds = ManifestDataset(val_slice, tokenizer, max_length=args.max_length)
         # Try using HF Trainer; if the installed transformers version's TrainingArguments
         # signature is incompatible, fall back to a small manual training loop.
         def simple_train(model, train_dataset, val_dataset, device, args):

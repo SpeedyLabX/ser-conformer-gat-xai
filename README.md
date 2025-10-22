@@ -28,7 +28,7 @@ This work introduces a **Conformer–GAT hybrid** that jointly captures temporal
 
 **Main contributions**
 - A **Compact Conformer** audio encoder built upon **WavLM-Base** embeddings.  
-- A **BERT/RoBERTa** text encoder for semantic representation.  
+- A **RoBERTa** text encoder for semantic representation.  
 - A **dual-channel GAT fusion** mechanism modeling intra- and inter-modal relations.  
 - An integrated **XAI suite** combining attention-based visualization, SHAP, and IG for transparent evaluation.
 
@@ -117,7 +117,7 @@ If you find this work useful, please cite:
 | **Hoang Pham Gia Bao**    | Audio Modeling · Fusion Design · XAI | [@BAOHOANG2005](https://github.com/BAOHOANG2005) |
 | **Le Nguyen Gia Hung**    | Text Modeling · Research Writing     | [@hei1sme](https://github.com/hei1sme)           |
 | **Vo Tan Phat**           | Evaluation · Benchmarking            | [@FappLord](https://github.com/FappLord)         |
-| **Le Nguyen Thien Danh**  | Evaluation · Benchmarking            | [@TBA](https://github.com/TBA)                   |
+| **Le Nguyen Thien Danh**  | Evaluation · Benchmarking            | [@ChrisLee1901](https://github.com/ChrisLee1901)                   |
 
 
 **Academic Mentor:** *Ms. Thu Le*

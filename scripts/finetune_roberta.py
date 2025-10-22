@@ -302,7 +302,7 @@ def main():
                 per_device_eval_batch_size=args.batch_size,
                 # some older HF versions don't accept evaluation_strategy kwarg; pass minimal set
                 save_strategy=args.evaluation_strategy,
-                evaluation_strategy=args.evaluation_strategy,
+                eval_strategy=args.evaluation_strategy,
                 gradient_accumulation_steps=args.accumulation_steps,
                 learning_rate=args.lr,
                 fp16=args.fp16,

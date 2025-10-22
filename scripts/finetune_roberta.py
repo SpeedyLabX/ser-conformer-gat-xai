@@ -13,6 +13,9 @@ import os
 import torch
 from torch.utils.data import Dataset
 
+# labels for HF CrossEntropy ignore index
+IGNORE_INDEX = -100
+
 try:
     from transformers import AutoTokenizer, AutoModelForSequenceClassification, Trainer, TrainingArguments
     HF_AVAILABLE = True
@@ -39,7 +42,12 @@ class ManifestDataset(Dataset):
         lbl = canonicalize_label(r.get('label', -1))
         toks = self.tokenizer(text, truncation=True, padding='max_length', max_length=self.max_length, return_tensors='pt')
         item = {k: v.squeeze(0) for k,v in toks.items()}
-        item['labels'] = torch.tensor(lbl if lbl is not None else -1, dtype=torch.long)
+        # HuggingFace CrossEntropyLoss uses ignore_index=-100 by default; map unknown labels to that
+        if lbl is None or (isinstance(lbl, int) and lbl < 0):
+            out_lbl = IGNORE_INDEX
+        else:
+            out_lbl = int(lbl)
+        item['labels'] = torch.tensor(out_lbl, dtype=torch.long)
         return item
 
 
@@ -250,15 +258,20 @@ def main():
                     v_iter = val_loader
                     if tqdm is not None:
                         v_iter = tqdm(val_loader, total=len(val_loader), desc='Validation')
-                    for vb in v_iter:
-                        vb = {k: v.to(device) for k, v in vb.items()}
-                        out = model(**{k: v for k, v in vb.items() if k!='labels'})
-                        logits = out.logits
-                        preds = torch.argmax(logits, dim=-1)
-                        labels = vb.get('labels')
-                        if labels is not None:
-                            correct += (preds == labels).sum().item()
-                            total += labels.size(0)
+                        for vb in v_iter:
+                            vb = {k: v.to(device) for k, v in vb.items()}
+                            out = model(**{k: v for k, v in vb.items() if k!='labels'})
+                            logits = out.logits
+                            preds = torch.argmax(logits, dim=-1)
+                            labels = vb.get('labels')
+                            if labels is not None:
+                                # respect ignore index when computing accuracy
+                                mask = labels != IGNORE_INDEX
+                                if mask.sum().item() > 0:
+                                    preds_masked = preds[mask]
+                                    labels_masked = labels[mask]
+                                    correct += (preds_masked == labels_masked).sum().item()
+                                    total += labels_masked.size(0)
 
                 acc = (correct / total) if total>0 else 0.0
                 print(f"Validation accuracy after epoch {epoch+1}: {acc:.4f}")

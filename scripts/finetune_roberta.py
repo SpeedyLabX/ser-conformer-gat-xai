@@ -101,13 +101,30 @@ def main():
             out_dir.mkdir(parents=True, exist_ok=True)
             state = {
                 'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict() if optimizer is not None else {},
             }
             if scaler is not None:
                 state['scaler_state_dict'] = scaler.state_dict()
             if step is not None:
                 state['step'] = step
+            # primary fallback checkpoint (contains optimizer/scaler)
             torch.save(state, out_dir / 'fallback_ckpt.pth')
+            # also save HF-style model file for downstream evaluation convenience
+            try:
+                torch.save(state['model_state_dict'], out_dir / 'pytorch_model.bin')
+            except Exception:
+                try:
+                    torch.save(model.state_dict(), out_dir / 'pytorch_model.bin')
+                except Exception:
+                    pass
+            # if a tokenizer object is available in the outer scope, try to save it too
+            try:
+                # tokenizer may not be defined in this scope; guard with globals
+                tok = globals().get('tokenizer', None)
+                if tok is not None and hasattr(tok, 'save_pretrained'):
+                    tok.save_pretrained(str(out_dir))
+            except Exception:
+                pass
 
 
         def load_checkpoint(model, optimizer, scaler, ckpt_path, device):

@@ -109,8 +109,8 @@ def main():
             scaler = torch.cuda.amp.GradScaler(enabled=use_fp16)
 
             model.to(device)
-            train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
-            val_loader = DataLoader(val_dataset, batch_size=args.batch_size)
+            train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=2, pin_memory=True)
+            val_loader = DataLoader(val_dataset, batch_size=args.batch_size, num_workers=2, pin_memory=True)
             optimizer = AdamW(model.parameters(), lr=args.lr)
 
             model.train()
@@ -120,55 +120,43 @@ def main():
                 for step, batch in enumerate(train_loader):
                     # move tensors to device but keep labels handling separate
                     labels = batch.get('labels')
-                    input_batch = {k: v.to(device) for k, v in batch.items() if k != 'labels'}
+                    input_batch = {k: v.to(device, non_blocking=True) for k, v in batch.items() if k != 'labels'}
 
                     if labels is not None:
-                        labels = labels.to(device)
+                        labels = labels.to(device, non_blocking=True)
                         # filter out entries with label < 0 (unlabeled)
                         mask = labels >= 0
                         if mask.sum().item() == 0:
                             # nothing to train on in this batch
-                            try:
-                                training_args = TrainingArguments(
-                                    output_dir=args.out_dir,
-                                    num_train_epochs=args.epochs,
-                                    per_device_train_batch_size=args.batch_size,
-                                    per_device_eval_batch_size=args.batch_size,
-                                    evaluation_strategy=args.evaluation_strategy,
-                                    save_strategy='epoch',
-                                    gradient_accumulation_steps=args.accumulation_steps,
-                                    learning_rate=args.lr,
-                                    fp16=args.fp16,
-                                    logging_steps=50,
-                                    load_best_model_at_end=args.load_best_model_at_end,
-                                    save_total_limit=args.save_total_limit,
-                                )
+                            continue
+                        # select only valid entries
+                        for k in list(input_batch.keys()):
+                            input_batch[k] = input_batch[k][mask]
+                        labels = labels[mask]
 
-                                # assemble Trainer callbacks (early stopping if requested)
-                                trainer_kwargs = dict(model=model, args=training_args, train_dataset=train_ds, eval_dataset=val_ds)
-                                callbacks = []
-                                if args.early_stopping_patience and args.early_stopping_patience > 0:
-                                    try:
-                                        from transformers import EarlyStoppingCallback
-                                        callbacks.append(EarlyStoppingCallback(early_stopping_patience=args.early_stopping_patience))
-                                    except Exception:
-                                        # if not available, continue without early stopping
-                                        callbacks = []
-
-                                if callbacks:
-                                    trainer_kwargs['callbacks'] = callbacks
-
-                                trainer = Trainer(**trainer_kwargs)
-                                trainer.train()
-                                trainer.save_model(args.out_dir)
-                                print('Saved RoBERTa model to', args.out_dir)
-                            except TypeError as te:
-                                # TrainingArguments signature incompatible with installed transformers -> fallback
-                                print('HF Trainer not compatible in this environment (TypeError). Falling back to simple training loop.\n', te)
-                                simple_train(model, train_ds, val_ds, device, args)
+                        # forward (mixed precision if requested)
+                        if use_fp16:
+                            with torch.cuda.amp.autocast():
+                                outputs = model(**input_batch, labels=labels)
+                                loss = outputs.loss if hasattr(outputs, 'loss') else outputs[0]
+                            scaler.scale(loss / max(1, args.accumulation_steps)).backward()
+                        else:
+                            outputs = model(**input_batch, labels=labels)
+                            loss = outputs.loss if hasattr(outputs, 'loss') else outputs[0]
+                            (loss / max(1, args.accumulation_steps)).backward()
                     else:
-                        loss.backward()
-                    running_loss += loss.item()
+                        # no labels provided; forward only (shouldn't happen for training)
+                        if use_fp16:
+                            with torch.cuda.amp.autocast():
+                                outputs = model(**input_batch)
+                                loss = None
+                        else:
+                            outputs = model(**input_batch)
+                            loss = None
+
+                    if loss is not None:
+                        running_loss += float(loss.detach().cpu().item())
+
                     if (step + 1) % args.accumulation_steps == 0:
                         if use_fp16:
                             scaler.step(optimizer)
@@ -210,27 +198,37 @@ def main():
                 torch.save(model.state_dict(), os.path.join(args.out_dir, 'pytorch_model.bin'))
             print('Saved RoBERTa model to', args.out_dir)
 
+        # Attempt to use HF Trainer; if incompatible, fall back to simple_train
         try:
             training_args = TrainingArguments(
                 output_dir=args.out_dir,
                 num_train_epochs=args.epochs,
                 per_device_train_batch_size=args.batch_size,
                 per_device_eval_batch_size=args.batch_size,
-                evaluation_strategy='epoch',
+                # some older HF versions don't accept evaluation_strategy kwarg; pass minimal set
                 save_strategy='epoch',
                 gradient_accumulation_steps=args.accumulation_steps,
                 learning_rate=args.lr,
                 fp16=args.fp16,
                 logging_steps=10,
-                load_best_model_at_end=False,
+                load_best_model_at_end=args.load_best_model_at_end,
+                save_total_limit=args.save_total_limit,
             )
 
-            trainer = Trainer(model=model, args=training_args, train_dataset=train_ds, eval_dataset=val_ds)
+            trainer_kwargs = dict(model=model, args=training_args, train_dataset=train_ds, eval_dataset=val_ds)
+            if args.early_stopping_patience and args.early_stopping_patience > 0:
+                try:
+                    from transformers import EarlyStoppingCallback
+                    trainer_kwargs['callbacks'] = [EarlyStoppingCallback(early_stopping_patience=args.early_stopping_patience)]
+                except Exception:
+                    pass
+
+            trainer = Trainer(**trainer_kwargs)
             trainer.train()
             trainer.save_model(args.out_dir)
             print('Saved RoBERTa model to', args.out_dir)
-        except TypeError as te:
-            print('HF Trainer not compatible in this environment (TypeError). Falling back to simple training loop.\n', te)
+        except Exception as te:
+            print('HF Trainer not available or incompatible, falling back to simple_train.\n', te)
             simple_train(model, train_ds, val_ds, device, args)
     else:
         print('transformers not available; aborting. Install transformers to run full finetune.')

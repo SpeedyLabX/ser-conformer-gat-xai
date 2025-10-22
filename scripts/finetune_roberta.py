@@ -64,6 +64,7 @@ def main():
     p.add_argument('--max_train_samples', type=int, default=0, help='Limit number of training samples (0 = use all)')
     p.add_argument('--max_val_samples', type=int, default=0, help='Limit number of validation samples (0 = use all)')
     p.add_argument('--use_tqdm', action='store_true', help='Enable tqdm progress bars in fallback loop')
+    p.add_argument('--resume_from_checkpoint', default=None, help='Path to checkpoint dir or file to resume fallback training')
     args = p.parse_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() and not args.cpu else 'cpu')
@@ -95,6 +96,33 @@ def main():
         val_ds = ManifestDataset(val_slice, tokenizer, max_length=args.max_length)
         # Try using HF Trainer; if the installed transformers version's TrainingArguments
         # signature is incompatible, fall back to a small manual training loop.
+        def save_checkpoint(model, optimizer, scaler, out_dir, step=None):
+            out_dir = Path(out_dir)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            state = {
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+            }
+            if scaler is not None:
+                state['scaler_state_dict'] = scaler.state_dict()
+            if step is not None:
+                state['step'] = step
+            torch.save(state, out_dir / 'fallback_ckpt.pth')
+
+
+        def load_checkpoint(model, optimizer, scaler, ckpt_path, device):
+            ckpt = torch.load(ckpt_path, map_location=device)
+            model.load_state_dict(ckpt.get('model_state_dict', {}))
+            if 'optimizer_state_dict' in ckpt and optimizer is not None:
+                optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+            if 'scaler_state_dict' in ckpt and scaler is not None:
+                try:
+                    scaler.load_state_dict(ckpt['scaler_state_dict'])
+                except Exception:
+                    pass
+            return ckpt.get('step', 0)
+
+
         def simple_train(model, train_dataset, val_dataset, device, args):
             from torch.utils.data import DataLoader
             from torch.optim import AdamW
@@ -110,10 +138,30 @@ def main():
             use_fp16 = args.fp16 and device.type == 'cuda'
             scaler = torch.cuda.amp.GradScaler(enabled=use_fp16)
 
+            # early stopping / resume bookkeeping
+            best_val = -1.0
+            best_epoch = -1
+            epochs_no_improve = 0
+            resume_step = 0
+
             model.to(device)
             train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=2, pin_memory=True)
             val_loader = DataLoader(val_dataset, batch_size=args.batch_size, num_workers=2, pin_memory=True)
             optimizer = AdamW(model.parameters(), lr=args.lr)
+
+            # optionally resume
+            if getattr(args, 'resume_from_checkpoint', None):
+                ckpt_p = Path(args.resume_from_checkpoint)
+                if ckpt_p.is_dir():
+                    ckpt_file = ckpt_p / 'fallback_ckpt.pth'
+                else:
+                    ckpt_file = ckpt_p
+                if ckpt_file.exists():
+                    try:
+                        resume_step = load_checkpoint(model, optimizer, scaler, str(ckpt_file), device)
+                        print(f"Resumed fallback training from {ckpt_file} (step={resume_step})")
+                    except Exception as e:
+                        print('Failed to load fallback checkpoint:', e)
 
             model.train()
             total_steps = 0
@@ -123,6 +171,9 @@ def main():
                 if tqdm is not None:
                     iterator = tqdm(enumerate(train_loader), total=len(train_loader), desc=f'Epoch {epoch+1}/{args.epochs}')
                 for step, batch in iterator:
+                    # skip batches if resuming mid-epoch
+                    if resume_step and step < resume_step:
+                        continue
                     # move tensors to device but keep labels handling separate
                     labels = batch.get('labels')
                     input_batch = {k: v.to(device, non_blocking=True) for k, v in batch.items() if k != 'labels'}
@@ -194,7 +245,26 @@ def main():
 
                 acc = (correct / total) if total>0 else 0.0
                 print(f"Validation accuracy after epoch {epoch+1}: {acc:.4f}")
+                # early stopping checks
+                if acc > best_val:
+                    best_val = acc
+                    best_epoch = epoch
+                    epochs_no_improve = 0
+                    # save best checkpoint
+                    try:
+                        save_checkpoint(model, optimizer, scaler, args.out_dir, step=total_steps)
+                        print('Saved fallback best checkpoint to', args.out_dir)
+                    except Exception as e:
+                        print('Failed to save fallback checkpoint:', e)
+                else:
+                    epochs_no_improve += 1
+
                 model.train()
+
+                if args.early_stopping_patience and args.early_stopping_patience > 0:
+                    if epochs_no_improve >= args.early_stopping_patience:
+                        print(f"Early stopping triggered (patience={args.early_stopping_patience}). Best epoch: {best_epoch+1}")
+                        return
 
             # save model and tokenizer
             os.makedirs(args.out_dir, exist_ok=True)

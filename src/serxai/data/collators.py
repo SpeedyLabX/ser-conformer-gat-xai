@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 import torch
 from pathlib import Path
+from serxai.data.labels import canonicalize_label
 
 
 class SimpleTokenizer:
@@ -52,34 +53,7 @@ class TextCollator:
                     input_ids[i, :L] = torch.tensor(seq[:L], dtype=torch.long)
                     attention_mask[i, :L] = 1
 
-        labels = []
-        for b in batch:
-                lab = b.get("label")
-                if lab is None:
-                    labels.append(-1)
-                else:
-                    # if label is already integer-like, keep it
-                    if isinstance(lab, int):
-                        labels.append(lab)
-                    else:
-                        # map common canonical labels to ints, fallback: attempt int conversion
-                        label_map = {
-                            "neutral": 0,
-                            "angry": 1,
-                            "frustration": 2,
-                            "happy": 3,
-                            "sad": 4,
-                            "fear": 5,
-                            "disgust": 6,
-                        }
-                        if isinstance(lab, str):
-                            key = lab.lower().strip()
-                            labels.append(label_map.get(key, -1))
-                        else:
-                            try:
-                                labels.append(int(lab))
-                            except Exception:
-                                labels.append(-1)
+        labels = [canonicalize_label(b.get("label")) for b in batch]
 
         return {"input_ids": input_ids, "attention_mask": attention_mask, "labels": torch.tensor(labels, dtype=torch.long)}
 

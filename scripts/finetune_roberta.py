@@ -21,6 +21,7 @@ except Exception:
 
 from serxai.data.iemocap_dataset import read_manifest, train_val_split
 from serxai.data.collators import TextCollator
+from serxai.data.labels import canonicalize_label
 
 
 class ManifestDataset(Dataset):
@@ -29,34 +30,13 @@ class ManifestDataset(Dataset):
         self.tokenizer = tokenizer
         self.max_length = max_length
 
-        # canonical label map (keep in sync with TextCollator)
-        self.label_map = {
-            "neutral": 0,
-            "angry": 1,
-            "frustration": 2,
-            "happy": 3,
-            "sad": 4,
-            "fear": 5,
-            "disgust": 6,
-        }
-
     def __len__(self):
         return len(self.records)
 
     def __getitem__(self, idx):
         r = self.records[idx]
         text = r.get('text','')
-        lbl = r.get('label', -1)
-        # canonicalize label to int if it is string-like
-        if isinstance(lbl, str):
-            key = lbl.lower().strip()
-            if key in self.label_map:
-                lbl = self.label_map[key]
-            else:
-                try:
-                    lbl = int(lbl)
-                except Exception:
-                    lbl = -1
+        lbl = canonicalize_label(r.get('label', -1))
         toks = self.tokenizer(text, truncation=True, padding='max_length', max_length=self.max_length, return_tensors='pt')
         item = {k: v.squeeze(0) for k,v in toks.items()}
         item['labels'] = torch.tensor(lbl if lbl is not None else -1, dtype=torch.long)

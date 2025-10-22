@@ -12,6 +12,7 @@ from serxai.data.iemocap_dataset import IEMOCAPTextDataset, read_manifest, train
 from serxai.data.collators import TextCollator
 from serxai.models.tokenizer_encoder import TokenizerEncoder
 from serxai.models.text_head import Head, instantiate_from_state_dict
+from serxai.data.labels import canonicalize_label
 
 
 def make_dataloader(records, tokenizer_encoder: TokenizerEncoder, batch_size=8, shuffle=False):
@@ -45,6 +46,8 @@ def train(args):
     # determine num_class if not provided
     if args.num_class is None:
         labels = [r.get("label", -1) for r in train_records + val_records]
+        # canonicalize provided labels (strings->int)
+        labels = [canonicalize_label(l) for l in labels]
         labels = [l for l in labels if l is not None and l >= 0]
         if len(labels) == 0:
             num_class = 4

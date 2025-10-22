@@ -1,0 +1,10 @@
+defaults:
+  backbone: roberta-base
+  max_length: 128
+  batch_size: 8
+  epochs: 3
+  lr: 2e-5
+  accumulation_steps: 1
+  weight_decay: 0.01
+  num_class: 7
+  out_dir: artifacts

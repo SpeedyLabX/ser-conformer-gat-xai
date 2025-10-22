@@ -16,6 +16,29 @@ data/
 *.tar.gz
 *.pt
 *.ckpt
+*.npy
+*.npz
+*.h5
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDEs / editors
+.vscode/
+.idea/
+
+# env / secrets
+.env
+.env.*
+
+# caches
+.pytest_cache/
+.mypy_cache/
+.cache/
+
+# OS
+.DS_Store
+Thumbs.db
 
 # dvc
 .dvc/

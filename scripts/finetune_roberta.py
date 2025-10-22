@@ -76,6 +76,11 @@ def main():
     p.add_argument('--num_class', type=int, default=7)
     p.add_argument('--cpu', action='store_true')
     p.add_argument('--fp16', action='store_true', help='Use mixed precision (torch.cuda.amp) in fallback training loop')
+    p.add_argument('--evaluation_strategy', type=str, default='epoch', help='HF Trainer evaluation strategy ("no"/"steps"/"epoch")')
+    p.add_argument('--save_total_limit', type=int, default=3, help='Max number of saved checkpoints')
+    p.add_argument('--load_best_model_at_end', action='store_true', help='If set, load best model at end by metric')
+    p.add_argument('--gradient_checkpointing', action='store_true', help='Enable model gradient checkpointing to save memory')
+    p.add_argument('--early_stopping_patience', type=int, default=0, help='Enable early stopping with this patience (0 disables)')
     args = p.parse_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() and not args.cpu else 'cpu')
@@ -85,6 +90,13 @@ def main():
     if HF_AVAILABLE:
         tokenizer = AutoTokenizer.from_pretrained(args.backbone)
         model = AutoModelForSequenceClassification.from_pretrained(args.backbone, num_labels=args.num_class)
+        # optionally enable gradient checkpointing (saves memory at the cost of compute)
+        if args.gradient_checkpointing:
+            try:
+                model.gradient_checkpointing_enable()
+            except Exception:
+                # older HF models may not have this API, ignore gracefully
+                pass
         train_ds = ManifestDataset(train_records[:1000], tokenizer, max_length=args.max_length)
         val_ds = ManifestDataset(val_records[:200], tokenizer, max_length=args.max_length)
         # Try using HF Trainer; if the installed transformers version's TrainingArguments
@@ -116,29 +128,44 @@ def main():
                         mask = labels >= 0
                         if mask.sum().item() == 0:
                             # nothing to train on in this batch
-                            continue
-                        # select only valid entries
-                        for k in list(input_batch.keys()):
-                            input_batch[k] = input_batch[k][mask]
-                        labels = labels[mask]
+                            try:
+                                training_args = TrainingArguments(
+                                    output_dir=args.out_dir,
+                                    num_train_epochs=args.epochs,
+                                    per_device_train_batch_size=args.batch_size,
+                                    per_device_eval_batch_size=args.batch_size,
+                                    evaluation_strategy=args.evaluation_strategy,
+                                    save_strategy='epoch',
+                                    gradient_accumulation_steps=args.accumulation_steps,
+                                    learning_rate=args.lr,
+                                    fp16=args.fp16,
+                                    logging_steps=50,
+                                    load_best_model_at_end=args.load_best_model_at_end,
+                                    save_total_limit=args.save_total_limit,
+                                )
 
-                        if use_fp16:
-                            with torch.cuda.amp.autocast():
-                                outputs = model(**input_batch, labels=labels)
-                        else:
-                            outputs = model(**input_batch, labels=labels)
-                    else:
-                        if use_fp16:
-                            with torch.cuda.amp.autocast():
-                                outputs = model(**input_batch)
-                        else:
-                            outputs = model(**input_batch)
+                                # assemble Trainer callbacks (early stopping if requested)
+                                trainer_kwargs = dict(model=model, args=training_args, train_dataset=train_ds, eval_dataset=val_ds)
+                                callbacks = []
+                                if args.early_stopping_patience and args.early_stopping_patience > 0:
+                                    try:
+                                        from transformers import EarlyStoppingCallback
+                                        callbacks.append(EarlyStoppingCallback(early_stopping_patience=args.early_stopping_patience))
+                                    except Exception:
+                                        # if not available, continue without early stopping
+                                        callbacks = []
 
-                    loss = outputs.loss if hasattr(outputs, 'loss') else outputs[0]
-                    loss = loss / max(1, args.accumulation_steps)
+                                if callbacks:
+                                    trainer_kwargs['callbacks'] = callbacks
 
-                    if use_fp16:
-                        scaler.scale(loss).backward()
+                                trainer = Trainer(**trainer_kwargs)
+                                trainer.train()
+                                trainer.save_model(args.out_dir)
+                                print('Saved RoBERTa model to', args.out_dir)
+                            except TypeError as te:
+                                # TrainingArguments signature incompatible with installed transformers -> fallback
+                                print('HF Trainer not compatible in this environment (TypeError). Falling back to simple training loop.\n', te)
+                                simple_train(model, train_ds, val_ds, device, args)
                     else:
                         loss.backward()
                     running_loss += loss.item()

@@ -98,16 +98,23 @@ def canonicalize_label(label: Optional[str]) -> Optional[str]:
         return "angry"
     if "frustr" in lab:
         return "frustration"
-    if "happy" in lab or "excited" in lab:
+    # prefer an explicit 'excited' label if present, otherwise match happy/happiness
+    if "excited" in lab:
+        return "excited"
+    if "happ" in lab:
         return "happy"
     if "sad" in lab:
         return "sad"
-    if "fear" in lab or "fearful" in lab:
+    if "surpr" in lab or "surprise" in lab:
+        return "surprise"
+    if "fear" in lab or "fearful" in lab or "fea" in lab:
         return "fear"
-    if "disgust" in lab:
+    if "disgust" in lab or "disg" in lab:
         return "disgust"
-    # otherwise return stripped raw label
-    return label.strip()
+    if "other" in lab or lab == "oth":
+        return "other"
+    # otherwise return the lowercased/raw label to keep consistent formatting
+    return lab
 
 
 def build_manifest(iemocap_root: Path) -> List[Dict]:

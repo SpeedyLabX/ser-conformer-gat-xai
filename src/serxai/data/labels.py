@@ -9,6 +9,7 @@ LABELS: List[str] = [
     "angry",
     "frustration",
     "happy",
+    "excited",
     "sad",
     "fear",
     "disgust",

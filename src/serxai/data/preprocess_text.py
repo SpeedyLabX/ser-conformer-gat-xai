@@ -20,6 +20,7 @@ from typing import Dict, Iterable, List, Optional
 
 UTT_RE = re.compile(r"(?P<utt>\S+) \[(?P<start>[\d.]+)-(?P<end>[\d.]+)\]:\s*(?P<text>.*)")
 CAT_RE = re.compile(r"(?P<utt>\S+)\s*:(?P<label>[^;]+);")
+EMO_HEADER_RE = re.compile(r"^\[(?P<start>[\d.]+)\s*-\s*(?P<end>[\d.]+)\]\s+(?P<utt>\S+)\s+(?P<code>\S+)\b")
 
 
 def parse_transcription_file(path: Path) -> List[Dict]:
@@ -68,6 +69,27 @@ def parse_categorical_file(path: Path) -> Dict[str, str]:
     return mapping
 
 
+def parse_emo_eval_file(path: Path) -> Dict[str, str]:
+    """Parse EmoEvaluation header-style files for short codes (e.g., 'neu', 'fru').
+
+    Lines look like:
+      [6.2901 - 8.2357]\tSes01F_impro01_F000\tneu\t[2.5000, 2.5000, 2.5000]
+    Returns mapping utt -> short_code (lowercased)
+    """
+    mapping: Dict[str, str] = {}
+    text = path.read_text(encoding="utf-8", errors="replace")
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("%"):
+            continue
+        m = EMO_HEADER_RE.match(line)
+        if m:
+            utt = m.group("utt")
+            code = m.group("code").strip()
+            mapping[utt] = code.lower()
+    return mapping
+
+
 def collect_categorical_for_session(cat_dir: Path) -> Dict[str, str]:
     """Collect labels from all categorical files in a session's categorical dir.
 
@@ -88,33 +110,24 @@ def collect_categorical_for_session(cat_dir: Path) -> Dict[str, str]:
 
 
 def canonicalize_label(label: Optional[str]) -> Optional[str]:
+    # We canonicalize to the 6-token set used for training: ["neu","hap","ang","sad","exc","fru"]
     if label is None:
         return None
-    lab = label.lower().strip()
-    # simple canonicalization map used in many IEMOCAP pipelines
-    if "neutral" in lab:
-        return "neutral"
+    lab = str(label).lower().strip()
+    if lab in ("neu", "neutral", "neutral state"):
+        return "neu"
+    if "happ" in lab or lab == "hap":
+        return "hap"
+    if "exc" in lab and not lab.startswith("excuse"):
+        return "exc"
     if "ang" in lab or "anger" in lab:
-        return "angry"
-    if "frustr" in lab:
-        return "frustration"
-    # prefer an explicit 'excited' label if present, otherwise match happy/happiness
-    if "excited" in lab:
-        return "excited"
-    if "happ" in lab:
-        return "happy"
-    if "sad" in lab:
+        return "ang"
+    if "sad" in lab or "sadness" in lab:
         return "sad"
-    if "surpr" in lab or "surprise" in lab:
-        return "surprise"
-    if "fear" in lab or "fearful" in lab or "fea" in lab:
-        return "fear"
-    if "disgust" in lab or "disg" in lab:
-        return "disgust"
-    if "other" in lab or lab == "oth":
-        return "other"
-    # otherwise return the lowercased/raw label to keep consistent formatting
-    return lab
+    if "frustr" in lab or lab == "fru":
+        return "fru"
+    # otherwise unknown / out-of-scope
+    return None
 
 
 def build_manifest(iemocap_root: Path) -> List[Dict]:
@@ -142,10 +155,19 @@ def build_manifest(iemocap_root: Path) -> List[Dict]:
         trans_dir = dialog / "transcriptions"
         lab_dir = dialog / "lab"
         wav_dir = dialog / "wav"
-        emo_cat_dir = dialog / "EmoEvaluation" / "Categorical"
+        emo_eval_dir = dialog / "EmoEvaluation"
 
-        # collect categorical labels (majority vote across annotators)
-        session_labels = collect_categorical_for_session(emo_cat_dir)
+        # collect labels from EmoEvaluation header files (preferred)
+        session_labels = {}
+        if emo_eval_dir.exists():
+            for p in sorted(emo_eval_dir.glob("*.txt")):
+                # skip per-annotator categorical files with *_cat.txt under a Categorical subfolder
+                if p.name.endswith("_cat.txt"):
+                    continue
+                m = parse_emo_eval_file(p)
+                for utt, code in m.items():
+                    if utt not in session_labels:
+                        session_labels[utt] = code
 
         # parse all transcription files
         if not trans_dir.exists():

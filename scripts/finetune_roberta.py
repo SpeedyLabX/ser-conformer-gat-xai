@@ -12,6 +12,7 @@ import os
 
 import torch
 from torch.utils.data import Dataset
+import numpy as np
 
 # labels for HF CrossEntropy ignore index
 IGNORE_INDEX = -100
@@ -58,6 +59,7 @@ def main():
     p.add_argument('--out_dir', default='artifacts')
     p.add_argument('--max_length', type=int, default=128)
     p.add_argument('--batch_size', type=int, default=4)
+    p.add_argument('--eval_batch_size', type=int, default=0, help='Evaluation batch size (0 -> use train batch size)')
     p.add_argument('--epochs', type=int, default=3)
     p.add_argument('--lr', type=float, default=2e-5)
     p.add_argument('--accumulation_steps', type=int, default=2)
@@ -77,6 +79,9 @@ def main():
     p.add_argument('--max_grad_norm', type=float, default=1.0, help='Max grad norm for clipping in fallback training')
     p.add_argument('--use_tqdm', action='store_true', help='Enable tqdm progress bars in fallback loop')
     p.add_argument('--resume_from_checkpoint', default=None, help='Path to checkpoint dir or file to resume fallback training')
+    p.add_argument('--keep_unlabeled', action='store_true', help='If set, keep unlabeled records (default: drop unlabeled)')
+    p.add_argument('--metric_for_best_model', type=str, default='eval_f1', help="Metric name to use for selecting best model (e.g. 'eval_f1' or 'eval_accuracy'). Empty to use eval_loss.")
+    p.add_argument('--metric_greater_is_better', type=lambda x: str(x).lower() in ('1','true','yes'), default=True, help='Whether larger value of metric is better (default True for accuracy/F1)')
     args = p.parse_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() and not args.cpu else 'cpu')
@@ -136,248 +141,251 @@ def main():
         else:
             val_slice = val_records
 
-        train_ds = ManifestDataset(train_slice, tokenizer, max_length=args.max_length)
-        val_ds = ManifestDataset(val_slice, tokenizer, max_length=args.max_length)
-        # Try using HF Trainer; if the installed transformers version's TrainingArguments
-        # signature is incompatible, fall back to a small manual training loop.
-        def save_checkpoint(model, optimizer, scaler, out_dir, step=None):
-            out_dir = Path(out_dir)
-            out_dir.mkdir(parents=True, exist_ok=True)
-            state = {
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict() if optimizer is not None else {},
-            }
-            if scaler is not None:
-                state['scaler_state_dict'] = scaler.state_dict()
-            if step is not None:
-                state['step'] = step
-            # primary fallback checkpoint (contains optimizer/scaler)
-            torch.save(state, out_dir / 'fallback_ckpt.pth')
-            # also save HF-style model file for downstream evaluation convenience
+    train_ds = ManifestDataset(train_slice, tokenizer, max_length=args.max_length)
+    # allow eval batch size override
+    val_ds = ManifestDataset(val_slice, tokenizer, max_length=args.max_length)
+    # Try using HF Trainer; if the installed transformers version's TrainingArguments
+    # signature is incompatible, fall back to a small manual training loop.
+    def save_checkpoint(model, optimizer, scaler, out_dir, step=None):
+        out_dir = Path(out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        state = {
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict() if optimizer is not None else {},
+        }
+        if scaler is not None:
+            state['scaler_state_dict'] = scaler.state_dict()
+        if step is not None:
+            state['step'] = step
+        # primary fallback checkpoint (contains optimizer/scaler)
+        torch.save(state, out_dir / 'fallback_ckpt.pth')
+        # also save HF-style model file for downstream evaluation convenience
+        try:
+            torch.save(state['model_state_dict'], out_dir / 'pytorch_model.bin')
+        except Exception:
             try:
-                torch.save(state['model_state_dict'], out_dir / 'pytorch_model.bin')
-            except Exception:
-                try:
-                    torch.save(model.state_dict(), out_dir / 'pytorch_model.bin')
-                except Exception:
-                    pass
-            # if a tokenizer object is available in the outer scope, try to save it too
-            try:
-                # tokenizer may not be defined in this scope; guard with globals
-                tok = globals().get('tokenizer', None)
-                if tok is not None and hasattr(tok, 'save_pretrained'):
-                    tok.save_pretrained(str(out_dir))
+                torch.save(model.state_dict(), out_dir / 'pytorch_model.bin')
             except Exception:
                 pass
+        # if a tokenizer object is available in the outer scope, try to save it too
+        try:
+            # tokenizer may not be defined in this scope; guard with globals
+            tok = globals().get('tokenizer', None)
+            if tok is not None and hasattr(tok, 'save_pretrained'):
+                tok.save_pretrained(str(out_dir))
+        except Exception:
+            pass
 
 
-        def load_checkpoint(model, optimizer, scaler, ckpt_path, device):
-            ckpt = torch.load(ckpt_path, map_location=device)
-            model.load_state_dict(ckpt.get('model_state_dict', {}))
-            if 'optimizer_state_dict' in ckpt and optimizer is not None:
-                optimizer.load_state_dict(ckpt['optimizer_state_dict'])
-            if 'scaler_state_dict' in ckpt and scaler is not None:
-                try:
-                    scaler.load_state_dict(ckpt['scaler_state_dict'])
-                except Exception:
-                    pass
-            return ckpt.get('step', 0)
+    def load_checkpoint(model, optimizer, scaler, ckpt_path, device):
+        ckpt = torch.load(ckpt_path, map_location=device)
+        model.load_state_dict(ckpt.get('model_state_dict', {}))
+        if 'optimizer_state_dict' in ckpt and optimizer is not None:
+            optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+        if 'scaler_state_dict' in ckpt and scaler is not None:
+            try:
+                scaler.load_state_dict(ckpt['scaler_state_dict'])
+            except Exception:
+                pass
+        return ckpt.get('step', 0)
 
 
-        def simple_train(model, train_dataset, val_dataset, device, args):
-            from torch.utils.data import DataLoader
-            from torch.optim import AdamW
-            import math
-            # optional tqdm
-            if getattr(args, 'use_tqdm', False):
-                try:
-                    from tqdm.auto import tqdm
-                except Exception:
-                    tqdm = None
-            else:
+    def simple_train(model, train_dataset, val_dataset, device, args):
+        from torch.utils.data import DataLoader
+        from torch.optim import AdamW
+        import math
+        # optional tqdm
+        if getattr(args, 'use_tqdm', False):
+            try:
+                from tqdm.auto import tqdm
+            except Exception:
                 tqdm = None
-            use_fp16 = args.fp16 and device.type == 'cuda'
-            scaler = torch.cuda.amp.GradScaler(enabled=use_fp16)
+        else:
+            tqdm = None
+        use_fp16 = args.fp16 and device.type == 'cuda'
+        scaler = torch.cuda.amp.GradScaler(enabled=use_fp16)
 
-            # early stopping / resume bookkeeping
-            best_val = -1.0
-            best_epoch = -1
-            epochs_no_improve = 0
-            resume_step = 0
+        # early stopping / resume bookkeeping
+        best_val = -1.0
+        best_epoch = -1
+        epochs_no_improve = 0
+        resume_step = 0
 
-            model.to(device)
-            train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=2, pin_memory=True)
-            val_loader = DataLoader(val_dataset, batch_size=args.batch_size, num_workers=2, pin_memory=True)
-            optimizer = AdamW(model.parameters(), lr=args.lr)
+        model.to(device)
+        eval_bs = args.eval_batch_size if getattr(args, 'eval_batch_size', 0) and args.eval_batch_size > 0 else args.batch_size
+        train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=2, pin_memory=True)
+        val_loader = DataLoader(val_dataset, batch_size=eval_bs, num_workers=2, pin_memory=True)
+        optimizer = AdamW(model.parameters(), lr=args.lr)
 
-            # optionally resume
-            if getattr(args, 'resume_from_checkpoint', None):
-                ckpt_p = Path(args.resume_from_checkpoint)
-                if ckpt_p.is_dir():
-                    ckpt_file = ckpt_p / 'fallback_ckpt.pth'
-                else:
-                    ckpt_file = ckpt_p
-                if ckpt_file.exists():
-                    try:
-                        resume_step = load_checkpoint(model, optimizer, scaler, str(ckpt_file), device)
-                        print(f"Resumed fallback training from {ckpt_file} (step={resume_step})")
-                    except Exception as e:
-                        print('Failed to load fallback checkpoint:', e)
+        # optionally resume
+        if getattr(args, 'resume_from_checkpoint', None):
+            ckpt_p = Path(args.resume_from_checkpoint)
+            if ckpt_p.is_dir():
+                ckpt_file = ckpt_p / 'fallback_ckpt.pth'
+            else:
+                ckpt_file = ckpt_p
+            if ckpt_file.exists():
+                try:
+                    resume_step = load_checkpoint(model, optimizer, scaler, str(ckpt_file), device)
+                    print(f"Resumed fallback training from {ckpt_file} (step={resume_step})")
+                except Exception as e:
+                    print('Failed to load fallback checkpoint:', e)
 
-            model.train()
-            total_steps = 0
-            for epoch in range(args.epochs):
-                running_loss = 0.0
-                iterator = enumerate(train_loader)
-                if tqdm is not None:
-                    iterator = tqdm(enumerate(train_loader), total=len(train_loader), desc=f'Epoch {epoch+1}/{args.epochs}')
-                for step, batch in iterator:
-                    # skip batches if resuming mid-epoch
-                    if resume_step and step < resume_step:
+        model.train()
+        total_steps = 0
+        for epoch in range(args.epochs):
+            running_loss = 0.0
+            iterator = enumerate(train_loader)
+            if tqdm is not None:
+                iterator = tqdm(enumerate(train_loader), total=len(train_loader), desc=f'Epoch {epoch+1}/{args.epochs}')
+            for step, batch in iterator:
+                # skip batches if resuming mid-epoch
+                if resume_step and step < resume_step:
+                    continue
+                # move tensors to device but keep labels handling separate
+                labels = batch.get('labels')
+                input_batch = {k: v.to(device, non_blocking=True) for k, v in batch.items() if k != 'labels'}
+
+                if labels is not None:
+                    labels = labels.to(device, non_blocking=True)
+                    # filter out entries with label < 0 (unlabeled)
+                    mask = labels >= 0
+                    if mask.sum().item() == 0:
+                        # nothing to train on in this batch
                         continue
-                    # move tensors to device but keep labels handling separate
-                    labels = batch.get('labels')
-                    input_batch = {k: v.to(device, non_blocking=True) for k, v in batch.items() if k != 'labels'}
+                    # select only valid entries
+                    for k in list(input_batch.keys()):
+                        input_batch[k] = input_batch[k][mask]
+                    labels = labels[mask]
 
-                    if labels is not None:
-                        labels = labels.to(device, non_blocking=True)
-                        # filter out entries with label < 0 (unlabeled)
-                        mask = labels >= 0
-                        if mask.sum().item() == 0:
-                            # nothing to train on in this batch
-                            continue
-                        # select only valid entries
-                        for k in list(input_batch.keys()):
-                            input_batch[k] = input_batch[k][mask]
-                        labels = labels[mask]
-
-                        # forward (mixed precision if requested)
-                        if use_fp16:
-                            with torch.cuda.amp.autocast():
-                                outputs = model(**input_batch, labels=labels)
-                                loss = outputs.loss if hasattr(outputs, 'loss') else outputs[0]
-                            scaler.scale(loss / max(1, args.accumulation_steps)).backward()
-                        else:
+                    # forward (mixed precision if requested)
+                    if use_fp16:
+                        with torch.cuda.amp.autocast():
                             outputs = model(**input_batch, labels=labels)
                             loss = outputs.loss if hasattr(outputs, 'loss') else outputs[0]
-                            (loss / max(1, args.accumulation_steps)).backward()
+                        scaler.scale(loss / max(1, args.accumulation_steps)).backward()
                     else:
-                        # no labels provided; forward only (shouldn't happen for training)
-                        if use_fp16:
-                            with torch.cuda.amp.autocast():
-                                outputs = model(**input_batch)
-                                loss = None
-                        else:
+                        outputs = model(**input_batch, labels=labels)
+                        loss = outputs.loss if hasattr(outputs, 'loss') else outputs[0]
+                        (loss / max(1, args.accumulation_steps)).backward()
+                else:
+                    # no labels provided; forward only (shouldn't happen for training)
+                    if use_fp16:
+                        with torch.cuda.amp.autocast():
                             outputs = model(**input_batch)
                             loss = None
+                    else:
+                        outputs = model(**input_batch)
+                        loss = None
 
-                    if loss is not None:
-                        running_loss += float(loss.detach().cpu().item())
+                if loss is not None:
+                    running_loss += float(loss.detach().cpu().item())
 
-                    if (step + 1) % args.accumulation_steps == 0:
-                        # gradient clipping to avoid explosion
-                        try:
-                            # compute pre-clip grad norm (safe): sqrt(sum(norm(p.grad)^2)) over non-None grads
-                            import math
-                            total_norm_sq = 0.0
-                            for p in model.parameters():
-                                if p.grad is not None:
-                                    try:
-                                        gnorm = float(p.grad.data.norm(2).item())
-                                    except Exception:
-                                        # numeric safety: skip unusual grads
-                                        continue
-                                    total_norm_sq += gnorm * gnorm
-                            pre_clip_norm = math.sqrt(total_norm_sq)
-                            # actually clip and capture the returned norm (this is the norm AFTER clipping)
-                            clipped_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float(getattr(args, 'max_grad_norm', 1.0)))
-                        except Exception:
-                            pre_clip_norm = None
-                            clipped_norm = None
-
-                        if use_fp16:
-                            scaler.step(optimizer)
-                            scaler.update()
-                        else:
-                            optimizer.step()
-                        optimizer.zero_grad()
-
-                        # print some grad diagnostic info occasionally (per accumulation step)
-                        try:
-                            if pre_clip_norm is not None and clipped_norm is not None:
-                                print({'step': total_steps, 'pre_grad_norm': float(pre_clip_norm), 'clipped_grad_norm': float(clipped_norm), 'learning_rate': optimizer.param_groups[0].get('lr', None)})
-                            else:
-                                # fallback lightweight logging
-                                print({'step': total_steps, 'clipped_grad_norm': float(getattr(args, 'max_grad_norm', 1.0)), 'learning_rate': optimizer.param_groups[0].get('lr', None)})
-                        except Exception:
-                            pass
-
-                        total_steps += 1
-
-                avg_loss = running_loss / max(1, len(train_loader))
-                print(f"Epoch {epoch+1}/{args.epochs} finished - avg_loss={avg_loss:.4f} steps={total_steps}")
-
-                # quick evaluation pass
-                model.eval()
-                correct = 0
-                total = 0
-                with torch.no_grad():
-                    v_iter = val_loader
-                    if tqdm is not None:
-                        v_iter = tqdm(val_loader, total=len(val_loader), desc='Validation')
-                        for vb in v_iter:
-                            vb = {k: v.to(device) for k, v in vb.items()}
-                            out = model(**{k: v for k, v in vb.items() if k!='labels'})
-                            logits = out.logits
-                            preds = torch.argmax(logits, dim=-1)
-                            labels = vb.get('labels')
-                            if labels is not None:
-                                # respect ignore index when computing accuracy
-                                mask = labels != IGNORE_INDEX
-                                if mask.sum().item() > 0:
-                                    preds_masked = preds[mask]
-                                    labels_masked = labels[mask]
-                                    correct += (preds_masked == labels_masked).sum().item()
-                                    total += labels_masked.size(0)
-
-                acc = (correct / total) if total>0 else 0.0
-                print(f"Validation accuracy after epoch {epoch+1}: {acc:.4f}")
-                # early stopping checks
-                if acc > best_val:
-                    best_val = acc
-                    best_epoch = epoch
-                    epochs_no_improve = 0
-                    # save best checkpoint
+                if (step + 1) % args.accumulation_steps == 0:
+                    # gradient clipping to avoid explosion
                     try:
-                        save_checkpoint(model, optimizer, scaler, args.out_dir, step=total_steps)
-                        print('Saved fallback best checkpoint to', args.out_dir)
-                    except Exception as e:
-                        print('Failed to save fallback checkpoint:', e)
-                else:
-                    epochs_no_improve += 1
+                        # compute pre-clip grad norm (safe): sqrt(sum(norm(p.grad)^2)) over non-None grads
+                        import math
+                        total_norm_sq = 0.0
+                        for p in model.parameters():
+                            if p.grad is not None:
+                                try:
+                                    gnorm = float(p.grad.data.norm(2).item())
+                                except Exception:
+                                    # numeric safety: skip unusual grads
+                                    continue
+                                total_norm_sq += gnorm * gnorm
+                        pre_clip_norm = math.sqrt(total_norm_sq)
+                        # actually clip and capture the returned norm (this is the norm AFTER clipping)
+                        clipped_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float(getattr(args, 'max_grad_norm', 1.0)))
+                    except Exception:
+                        pre_clip_norm = None
+                        clipped_norm = None
 
-                model.train()
+                    if use_fp16:
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        optimizer.step()
+                    optimizer.zero_grad()
 
-                if args.early_stopping_patience and args.early_stopping_patience > 0:
-                    if epochs_no_improve >= args.early_stopping_patience:
-                        print(f"Early stopping triggered (patience={args.early_stopping_patience}). Best epoch: {best_epoch+1}")
-                        return
+                    # print some grad diagnostic info occasionally (per accumulation step)
+                    try:
+                        if pre_clip_norm is not None and clipped_norm is not None:
+                            print({'step': total_steps, 'pre_grad_norm': float(pre_clip_norm), 'clipped_grad_norm': float(clipped_norm), 'learning_rate': optimizer.param_groups[0].get('lr', None)})
+                        else:
+                            # fallback lightweight logging
+                            print({'step': total_steps, 'clipped_grad_norm': float(getattr(args, 'max_grad_norm', 1.0)), 'learning_rate': optimizer.param_groups[0].get('lr', None)})
+                    except Exception:
+                        pass
 
-            # save model and tokenizer
-            os.makedirs(args.out_dir, exist_ok=True)
-            try:
-                model.save_pretrained(args.out_dir)
-                tokenizer.save_pretrained(args.out_dir)
-            except Exception:
-                # fallback: save state_dict
-                torch.save(model.state_dict(), os.path.join(args.out_dir, 'pytorch_model.bin'))
-            print('Saved RoBERTa model to', args.out_dir)
+                    total_steps += 1
+
+            avg_loss = running_loss / max(1, len(train_loader))
+            print(f"Epoch {epoch+1}/{args.epochs} finished - avg_loss={avg_loss:.4f} steps={total_steps}")
+
+            # quick evaluation pass
+            model.eval()
+            correct = 0
+            total = 0
+            with torch.no_grad():
+                v_iter = val_loader
+                if tqdm is not None:
+                    v_iter = tqdm(val_loader, total=len(val_loader), desc='Validation')
+                    for vb in v_iter:
+                        vb = {k: v.to(device) for k, v in vb.items()}
+                        out = model(**{k: v for k, v in vb.items() if k!='labels'})
+                        logits = out.logits
+                        preds = torch.argmax(logits, dim=-1)
+                        labels = vb.get('labels')
+                        if labels is not None:
+                            # respect ignore index when computing accuracy
+                            mask = labels != IGNORE_INDEX
+                            if mask.sum().item() > 0:
+                                preds_masked = preds[mask]
+                                labels_masked = labels[mask]
+                                correct += (preds_masked == labels_masked).sum().item()
+                                total += labels_masked.size(0)
+
+            acc = (correct / total) if total>0 else 0.0
+            print(f"Validation accuracy after epoch {epoch+1}: {acc:.4f}")
+            # early stopping checks
+            if acc > best_val:
+                best_val = acc
+                best_epoch = epoch
+                epochs_no_improve = 0
+                # save best checkpoint
+                try:
+                    save_checkpoint(model, optimizer, scaler, args.out_dir, step=total_steps)
+                    print('Saved fallback best checkpoint to', args.out_dir)
+                except Exception as e:
+                    print('Failed to save fallback checkpoint:', e)
+            else:
+                epochs_no_improve += 1
+
+            model.train()
+
+            if args.early_stopping_patience and args.early_stopping_patience > 0:
+                if epochs_no_improve >= args.early_stopping_patience:
+                    print(f"Early stopping triggered (patience={args.early_stopping_patience}). Best epoch: {best_epoch+1}")
+                    return
+
+        # save model and tokenizer
+        os.makedirs(args.out_dir, exist_ok=True)
         try:
-            training_args = TrainingArguments(
+            model.save_pretrained(args.out_dir)
+            tokenizer.save_pretrained(args.out_dir)
+        except Exception:
+            # fallback: save state_dict
+            torch.save(model.state_dict(), os.path.join(args.out_dir, 'pytorch_model.bin'))
+        print('Saved RoBERTa model to', args.out_dir)
+        try:
+            # build TrainingArguments; include metric_for_best_model/greatness if requested
+            ta_kwargs = dict(
                 output_dir=args.out_dir,
                 num_train_epochs=args.epochs,
                 per_device_train_batch_size=args.batch_size,
-                per_device_eval_batch_size=args.batch_size,
+                per_device_eval_batch_size=(args.eval_batch_size if getattr(args, 'eval_batch_size', 0) and args.eval_batch_size > 0 else args.batch_size),
                 # some older HF versions don't accept evaluation_strategy kwarg; pass minimal set
                 save_strategy=args.evaluation_strategy,
                 eval_strategy=args.evaluation_strategy,
@@ -389,6 +397,11 @@ def main():
                 load_best_model_at_end=args.load_best_model_at_end,
                 save_total_limit=args.save_total_limit,
             )
+            if args.metric_for_best_model:
+                ta_kwargs['metric_for_best_model'] = args.metric_for_best_model
+                ta_kwargs['greater_is_better'] = bool(args.metric_greater_is_better)
+
+            training_args = TrainingArguments(**ta_kwargs)
 
             trainer_kwargs = dict(model=model, args=training_args, train_dataset=train_ds, eval_dataset=val_ds)
             if args.early_stopping_patience and args.early_stopping_patience > 0:
@@ -398,14 +411,44 @@ def main():
                 except Exception:
                     pass
 
+            # optional compute_metrics (accuracy + macro F1) to choose best model by desired metric
+            def compute_metrics(eval_pred):
+                logits, labels = eval_pred
+                try:
+                    from sklearn.metrics import accuracy_score, f1_score
+                except Exception:
+                    return {}
+                preds = np.argmax(logits, axis=-1)
+                # respect IGNORE_INDEX
+                mask = labels != IGNORE_INDEX
+                if mask.ndim > 1:
+                    # sometimes labels come as shape (n,1)
+                    labels = labels.squeeze()
+                    mask = labels != IGNORE_INDEX
+                labels_f = labels[mask]
+                preds_f = preds[mask]
+                if labels_f.size == 0:
+                    return {}
+                acc = float(accuracy_score(labels_f, preds_f))
+                f1 = float(f1_score(labels_f, preds_f, average='macro', zero_division=0))
+                return { 'accuracy': acc, 'f1': f1, 'eval_accuracy': acc, 'eval_f1': f1 }
+
+            trainer_kwargs['compute_metrics'] = compute_metrics
             trainer = Trainer(**trainer_kwargs)
             trainer.train()
             trainer.save_model(args.out_dir)
+            # ensure tokenizer is saved into output directory for offline evaluation
+            try:
+                tokenizer.save_pretrained(args.out_dir)
+            except Exception:
+                pass
             print('Saved RoBERTa model to', args.out_dir)
         except Exception as te:
             print('HF Trainer not available or incompatible, falling back to simple_train.\n', te)
             simple_train(model, train_ds, val_ds, device, args)
-    else:
+
+    # If HF is not available at all, inform the user
+    if not HF_AVAILABLE:
         print('transformers not available; aborting. Install transformers to run full finetune.')
 
 

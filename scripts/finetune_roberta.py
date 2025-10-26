@@ -74,6 +74,7 @@ def main():
     p.add_argument('--early_stopping_patience', type=int, default=0, help='Enable early stopping with this patience (0 disables)')
     p.add_argument('--max_train_samples', type=int, default=0, help='Limit number of training samples (0 = use all)')
     p.add_argument('--max_val_samples', type=int, default=0, help='Limit number of validation samples (0 = use all)')
+    p.add_argument('--max_grad_norm', type=float, default=1.0, help='Max grad norm for clipping in fallback training')
     p.add_argument('--use_tqdm', action='store_true', help='Enable tqdm progress bars in fallback loop')
     p.add_argument('--resume_from_checkpoint', default=None, help='Path to checkpoint dir or file to resume fallback training')
     args = p.parse_args()
@@ -90,6 +91,29 @@ def main():
         train_records, val_records = train_test_by_sessions(manifest, train_sessions=train_sessions, test_sessions=test_sessions)
     else:
         train_records, val_records = train_val_split(manifest, val_ratio=0.1)
+
+    # Quick diagnostics: count labeled vs unlabeled and optionally filter
+    def _is_labeled(rec):
+        return canonicalize_label(rec.get('label', None)) >= 0
+
+    n_total = len(manifest)
+    n_train = len(train_records)
+    n_val = len(val_records)
+    n_train_labeled = sum(1 for r in train_records if _is_labeled(r))
+    n_val_labeled = sum(1 for r in val_records if _is_labeled(r))
+    print(f"Manifest total={n_total} train={n_train} val={n_val} | labeled: train={n_train_labeled} val={n_val_labeled}")
+
+    # By default, drop unlabeled records from training and validation because
+    # they map to IGNORE_INDEX and can cause evaluation to produce NaN when
+    # an eval split contains zero labeled samples. Provide a flag to keep them
+    # if user explicitly wants to train with unlabeled examples.
+    if not getattr(args, 'keep_unlabeled', False):
+        train_records = [r for r in train_records if _is_labeled(r)]
+        val_records = [r for r in val_records if _is_labeled(r)]
+        print(f"Filtered unlabeled records -> train={len(train_records)} val={len(val_records)}")
+
+    if len(val_records) == 0:
+        raise RuntimeError('Validation set contains 0 labeled examples after filtering. Rebuild manifest or adjust split.')
 
     if HF_AVAILABLE:
         tokenizer = AutoTokenizer.from_pretrained(args.backbone)
@@ -251,6 +275,11 @@ def main():
                         running_loss += float(loss.detach().cpu().item())
 
                     if (step + 1) % args.accumulation_steps == 0:
+                        # gradient clipping to avoid explosion
+                        try:
+                            torch.nn.utils.clip_grad_norm_(model.parameters(), float(getattr(args, 'max_grad_norm', 1.0)))
+                        except Exception:
+                            pass
                         if use_fp16:
                             scaler.step(optimizer)
                             scaler.update()
@@ -317,8 +346,6 @@ def main():
                 # fallback: save state_dict
                 torch.save(model.state_dict(), os.path.join(args.out_dir, 'pytorch_model.bin'))
             print('Saved RoBERTa model to', args.out_dir)
-
-        # Attempt to use HF Trainer; if incompatible, fall back to simple_train
         try:
             training_args = TrainingArguments(
                 output_dir=args.out_dir,

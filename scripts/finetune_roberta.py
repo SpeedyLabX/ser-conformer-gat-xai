@@ -22,7 +22,7 @@ try:
 except Exception:
     HF_AVAILABLE = False
 
-from serxai.data.iemocap_dataset import read_manifest, train_val_split
+from serxai.data.iemocap_dataset import read_manifest, train_val_split, train_test_by_sessions
 from serxai.data.collators import TextCollator
 from serxai.data.labels import canonicalize_label
 
@@ -61,7 +61,10 @@ def main():
     p.add_argument('--epochs', type=int, default=3)
     p.add_argument('--lr', type=float, default=2e-5)
     p.add_argument('--accumulation_steps', type=int, default=2)
-    p.add_argument('--num_class', type=int, default=7)
+    p.add_argument('--num_class', type=int, default=6)
+    p.add_argument('--split_by_session', action='store_true', help='If set, split train/test by session ids (train: 1-4, test: 5)')
+    p.add_argument('--train_sessions', type=str, default='1,2,3,4', help='Comma-separated train session ids')
+    p.add_argument('--test_sessions', type=str, default='5', help='Comma-separated test session ids')
     p.add_argument('--cpu', action='store_true')
     p.add_argument('--fp16', action='store_true', help='Use mixed precision (torch.cuda.amp) in fallback training loop')
     p.add_argument('--evaluation_strategy', type=str, default='epoch', help='HF Trainer evaluation strategy ("no"/"steps"/"epoch")')
@@ -77,7 +80,16 @@ def main():
 
     device = torch.device('cuda' if torch.cuda.is_available() and not args.cpu else 'cpu')
     manifest = read_manifest(Path(args.manifest))
-    train_records, val_records = train_val_split(manifest, val_ratio=0.1)
+    if args.split_by_session:
+        try:
+            train_sessions = tuple(int(x) for x in args.train_sessions.split(','))
+            test_sessions = tuple(int(x) for x in args.test_sessions.split(','))
+        except Exception:
+            train_sessions = (1, 2, 3, 4)
+            test_sessions = (5,)
+        train_records, val_records = train_test_by_sessions(manifest, train_sessions=train_sessions, test_sessions=test_sessions)
+    else:
+        train_records, val_records = train_val_split(manifest, val_ratio=0.1)
 
     if HF_AVAILABLE:
         tokenizer = AutoTokenizer.from_pretrained(args.backbone)

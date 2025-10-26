@@ -53,6 +53,49 @@ def train_val_split(records: List[Dict], val_ratio: float = 0.1, seed: int = 42)
     return train, val
 
 
+def train_test_by_sessions(records: List[Dict], train_sessions=(1, 2, 3, 4), test_sessions=(5,)):
+    """Split manifest records into train/test lists based on the numeric session id.
+
+    Records should include a 'session' field which is either an int or a string
+    such as 'session1' or 'S1'. The function extracts the first integer found
+    and assigns the record to train or test depending on the provided tuples.
+    Records with unknown session are placed into the training set by default.
+    """
+    import re
+
+    train_s = set(int(x) for x in train_sessions)
+    test_s = set(int(x) for x in test_sessions)
+
+    train = []
+    test = []
+    for r in records:
+        s = r.get('session', None)
+        sess_id = None
+        if s is None:
+            sess_id = None
+        else:
+            if isinstance(s, int):
+                sess_id = s
+            else:
+                # attempt to extract a digit
+                m = re.search(r"(\d+)", str(s))
+                if m:
+                    try:
+                        sess_id = int(m.group(1))
+                    except Exception:
+                        sess_id = None
+                else:
+                    sess_id = None
+
+        if sess_id in test_s:
+            test.append(r)
+        else:
+            # default to train for unknown or train sessions
+            train.append(r)
+
+    return train, test
+
+
 def collate_from_manifest(batch: List[Dict], collator_any) -> Dict:
     """Utility to collate a batch of manifest records using provided collator."""
     return collator_any(batch)

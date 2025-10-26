@@ -20,7 +20,7 @@ from serxai.data.iemocap_dataset import read_manifest, train_val_split
 from serxai.models.tokenizer_encoder import TokenizerEncoder
 from serxai.data.collators import TextCollator
 from serxai.models.text_head import instantiate_from_state_dict
-from serxai.data.labels import LABELS
+from serxai.data.labels import LABELS, canonicalize_label, map_to_4class_idx
 
 
 def evaluate(
@@ -32,6 +32,7 @@ def evaluate(
     max_val_samples: int = 0,
     out_dir_p: Path = Path("artifacts"),
     save_confusion_plot: bool = False,
+    map_to_4class: bool = False,
 ):
     manifest = read_manifest(manifest_p)
     train_records, val_records = train_val_split(manifest, val_ratio=0.1)
@@ -116,12 +117,25 @@ def evaluate(
 
     wa = float(accuracy_score(ys_true, ys_pred))
     ua = float(recall_score(ys_true, ys_pred, average="macro", zero_division=0))
-    mf1 = float(f1_score(ys_true, ys_pred, average="macro", zero_division=0))
+    uf1 = float(f1_score(ys_true, ys_pred, average="macro", zero_division=0))
+    wf1 = float(f1_score(ys_true, ys_pred, average="weighted", zero_division=0))
     cm = confusion_matrix(ys_true, ys_pred)
 
-    # per-class metrics (use canonical label names)
-    n_classes = cm.shape[0]
-    label_names = LABELS[:n_classes]
+    # Optionally map to 4-class scheme for inference/analysis
+    if map_to_4class:
+        # map predictions and truths
+        ys_true = np.array([map_to_4class_idx(int(x)) for x in ys_true])
+        ys_pred = np.array([map_to_4class_idx(int(x)) for x in ys_pred])
+        # filter unknowns again
+        mask2 = (ys_true >= 0) & (ys_pred >= 0)
+        ys_true = ys_true[mask2]
+        ys_pred = ys_pred[mask2]
+
+    n_classes = int(max(ys_true.max(), ys_pred.max()) + 1)
+    if map_to_4class:
+        label_names = ["neu", "hap", "ang", "sad"]
+    else:
+        label_names = LABELS[:n_classes]
     per_class = {}
     for c in range(n_classes):
         cls_prec = float(precision_score(ys_true, ys_pred, labels=[c], average="macro", zero_division=0))
@@ -134,7 +148,8 @@ def evaluate(
         "n_samples": int(len(ys_true)),
         "WA": wa,
         "UA": ua,
-        "MacroF1": mf1,
+        "UF1": uf1,
+        "WF1": wf1,
         "per_class": per_class,
         "label_names": label_names,
         "confusion_matrix": cm.tolist(),
@@ -227,6 +242,7 @@ def cli():
     p.add_argument("--max_val_samples", type=int, default=0, help='Limit validation samples (0 = use all)')
     p.add_argument("--out_dir", default="artifacts", help='Output directory for report and optional plot')
     p.add_argument("--save_confusion_plot", action="store_true", help='Save a confusion_matrix.png into out_dir')
+    p.add_argument("--map_to_4class", action="store_true", help='Map 6-class predictions/labels to 4-class scheme for metrics')
     args = p.parse_args()
     evaluate(
         Path(args.manifest),
@@ -237,6 +253,7 @@ def cli():
         max_val_samples=args.max_val_samples,
         out_dir_p=Path(args.out_dir),
         save_confusion_plot=args.save_confusion_plot,
+        map_to_4class=args.map_to_4class,
     )
 
 

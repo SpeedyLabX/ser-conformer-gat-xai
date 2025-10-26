@@ -277,15 +277,41 @@ def main():
                     if (step + 1) % args.accumulation_steps == 0:
                         # gradient clipping to avoid explosion
                         try:
-                            torch.nn.utils.clip_grad_norm_(model.parameters(), float(getattr(args, 'max_grad_norm', 1.0)))
+                            # compute pre-clip grad norm (safe): sqrt(sum(norm(p.grad)^2)) over non-None grads
+                            import math
+                            total_norm_sq = 0.0
+                            for p in model.parameters():
+                                if p.grad is not None:
+                                    try:
+                                        gnorm = float(p.grad.data.norm(2).item())
+                                    except Exception:
+                                        # numeric safety: skip unusual grads
+                                        continue
+                                    total_norm_sq += gnorm * gnorm
+                            pre_clip_norm = math.sqrt(total_norm_sq)
+                            # actually clip and capture the returned norm (this is the norm AFTER clipping)
+                            clipped_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float(getattr(args, 'max_grad_norm', 1.0)))
                         except Exception:
-                            pass
+                            pre_clip_norm = None
+                            clipped_norm = None
+
                         if use_fp16:
                             scaler.step(optimizer)
                             scaler.update()
                         else:
                             optimizer.step()
                         optimizer.zero_grad()
+
+                        # print some grad diagnostic info occasionally (per accumulation step)
+                        try:
+                            if pre_clip_norm is not None and clipped_norm is not None:
+                                print({'step': total_steps, 'pre_grad_norm': float(pre_clip_norm), 'clipped_grad_norm': float(clipped_norm), 'learning_rate': optimizer.param_groups[0].get('lr', None)})
+                            else:
+                                # fallback lightweight logging
+                                print({'step': total_steps, 'clipped_grad_norm': float(getattr(args, 'max_grad_norm', 1.0)), 'learning_rate': optimizer.param_groups[0].get('lr', None)})
+                        except Exception:
+                            pass
+
                         total_steps += 1
 
                 avg_loss = running_loss / max(1, len(train_loader))
@@ -358,6 +384,7 @@ def main():
                 gradient_accumulation_steps=args.accumulation_steps,
                 learning_rate=args.lr,
                 fp16=args.fp16,
+                max_grad_norm=float(getattr(args, 'max_grad_norm', 1.0)),
                 logging_steps=10,
                 load_best_model_at_end=args.load_best_model_at_end,
                 save_total_limit=args.save_total_limit,

@@ -204,7 +204,28 @@ def main():
         else:
             tqdm = None
         use_fp16 = args.fp16 and device.type == 'cuda'
-        scaler = torch.cuda.amp.GradScaler(enabled=use_fp16)
+        def _create_autocast_ctx():
+            if use_fp16:
+                if hasattr(torch, 'amp') and hasattr(torch.amp, 'autocast'):
+                    try:
+                        return torch.amp.autocast('cuda')
+                    except TypeError:
+                        # very recent torch expects keyword form
+                        return torch.amp.autocast(device_type='cuda')
+                return torch.cuda.amp.autocast()
+            from contextlib import nullcontext
+            return nullcontext()
+
+        if use_fp16 and hasattr(torch, 'amp') and hasattr(torch.amp, 'GradScaler'):
+            try:
+                scaler = torch.amp.GradScaler('cuda', enabled=True)
+            except TypeError:
+                try:
+                    scaler = torch.amp.GradScaler(device_type='cuda', enabled=True)  # keyword-only form
+                except TypeError:
+                    scaler = torch.amp.GradScaler(enabled=True)
+        else:
+            scaler = torch.cuda.amp.GradScaler(enabled=use_fp16)
 
         # early stopping / resume bookkeeping
         best_val = -1.0
@@ -261,7 +282,7 @@ def main():
 
                     # forward (mixed precision if requested)
                     if use_fp16:
-                        with torch.cuda.amp.autocast():
+                        with _create_autocast_ctx():
                             outputs = model(**input_batch, labels=labels)
                             loss = outputs.loss if hasattr(outputs, 'loss') else outputs[0]
                         scaler.scale(loss / max(1, args.accumulation_steps)).backward()
@@ -272,7 +293,7 @@ def main():
                 else:
                     # no labels provided; forward only (shouldn't happen for training)
                     if use_fp16:
-                        with torch.cuda.amp.autocast():
+                        with _create_autocast_ctx():
                             outputs = model(**input_batch)
                             loss = None
                     else:
@@ -404,7 +425,30 @@ def main():
             ta_kwargs['greater_is_better'] = bool(args.metric_greater_is_better)
 
         print('DEBUG: Building TrainingArguments...', flush=True)
-        training_args = TrainingArguments(**ta_kwargs)
+        filtered_ta_kwargs = dict(ta_kwargs)
+        dropped_kwargs = []
+        while True:
+            try:
+                training_args = TrainingArguments(**filtered_ta_kwargs)
+                break
+            except TypeError as te:
+                msg = str(te)
+                if 'unexpected keyword argument' in msg:
+                    bad_kw = msg.split("'")[1]
+                    if bad_kw in filtered_ta_kwargs:
+                        filtered_ta_kwargs.pop(bad_kw)
+                        dropped_kwargs.append(bad_kw)
+                        print(f"DEBUG: TrainingArguments dropped unsupported kwarg '{bad_kw}' and retrying", flush=True)
+                        continue
+                raise
+
+        for dropped in dropped_kwargs:
+            if dropped in ta_kwargs and hasattr(training_args, dropped):
+                try:
+                    setattr(training_args, dropped, ta_kwargs[dropped])
+                    print(f"DEBUG: TrainingArguments attr '{dropped}' set post-init for compatibility", flush=True)
+                except Exception:
+                    pass
 
         trainer_kwargs = dict(model=model, args=training_args, train_dataset=train_ds, eval_dataset=val_ds)
         print('DEBUG: Trainer kwargs prepared (model, training_args, train_dataset, eval_dataset)', flush=True)

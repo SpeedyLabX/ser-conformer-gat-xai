@@ -409,9 +409,10 @@ def main():
             num_train_epochs=args.epochs,
             per_device_train_batch_size=args.batch_size,
             per_device_eval_batch_size=(args.eval_batch_size if getattr(args, 'eval_batch_size', 0) and args.eval_batch_size > 0 else args.batch_size),
-            # some older HF versions don't accept evaluation_strategy kwarg; pass minimal set
+            # older HF releases vary between eval_strategy and evaluation_strategy
             save_strategy=args.evaluation_strategy,
             evaluation_strategy=args.evaluation_strategy,
+            eval_strategy=args.evaluation_strategy,
             gradient_accumulation_steps=args.accumulation_steps,
             learning_rate=args.lr,
             fp16=args.fp16,

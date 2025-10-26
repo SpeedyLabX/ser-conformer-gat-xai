@@ -123,6 +123,7 @@ def main():
     if HF_AVAILABLE:
         tokenizer = AutoTokenizer.from_pretrained(args.backbone)
         model = AutoModelForSequenceClassification.from_pretrained(args.backbone, num_labels=args.num_class)
+        print('DEBUG: Loaded tokenizer and model from backbone', args.backbone, flush=True)
         # optionally enable gradient checkpointing (saves memory at the cost of compute)
         if args.gradient_checkpointing:
             try:
@@ -401,9 +402,11 @@ def main():
                 ta_kwargs['metric_for_best_model'] = args.metric_for_best_model
                 ta_kwargs['greater_is_better'] = bool(args.metric_greater_is_better)
 
+            print('DEBUG: Building TrainingArguments...', flush=True)
             training_args = TrainingArguments(**ta_kwargs)
 
             trainer_kwargs = dict(model=model, args=training_args, train_dataset=train_ds, eval_dataset=val_ds)
+            print('DEBUG: Trainer kwargs prepared (model, training_args, train_dataset, eval_dataset)', flush=True)
             if args.early_stopping_patience and args.early_stopping_patience > 0:
                 try:
                     from transformers import EarlyStoppingCallback
@@ -434,8 +437,11 @@ def main():
                 return { 'accuracy': acc, 'f1': f1, 'eval_accuracy': acc, 'eval_f1': f1 }
 
             trainer_kwargs['compute_metrics'] = compute_metrics
+            print('DEBUG: Creating Trainer instance...', flush=True)
             trainer = Trainer(**trainer_kwargs)
+            print('DEBUG: Trainer created. Calling trainer.train()...', flush=True)
             trainer.train()
+            print('DEBUG: trainer.train() finished. Saving model...', flush=True)
             trainer.save_model(args.out_dir)
             # ensure tokenizer is saved into output directory for offline evaluation
             try:

@@ -380,78 +380,79 @@ def main():
             # fallback: save state_dict
             torch.save(model.state_dict(), os.path.join(args.out_dir, 'pytorch_model.bin'))
         print('Saved RoBERTa model to', args.out_dir)
-        try:
-            # build TrainingArguments; include metric_for_best_model/greatness if requested
-            ta_kwargs = dict(
-                output_dir=args.out_dir,
-                num_train_epochs=args.epochs,
-                per_device_train_batch_size=args.batch_size,
-                per_device_eval_batch_size=(args.eval_batch_size if getattr(args, 'eval_batch_size', 0) and args.eval_batch_size > 0 else args.batch_size),
-                # some older HF versions don't accept evaluation_strategy kwarg; pass minimal set
-                save_strategy=args.evaluation_strategy,
-                eval_strategy=args.evaluation_strategy,
-                gradient_accumulation_steps=args.accumulation_steps,
-                learning_rate=args.lr,
-                fp16=args.fp16,
-                max_grad_norm=float(getattr(args, 'max_grad_norm', 1.0)),
-                logging_steps=10,
-                load_best_model_at_end=args.load_best_model_at_end,
-                save_total_limit=args.save_total_limit,
-            )
-            if args.metric_for_best_model:
-                ta_kwargs['metric_for_best_model'] = args.metric_for_best_model
-                ta_kwargs['greater_is_better'] = bool(args.metric_greater_is_better)
 
-            print('DEBUG: Building TrainingArguments...', flush=True)
-            training_args = TrainingArguments(**ta_kwargs)
+    try:
+        # build TrainingArguments; include metric_for_best_model/greatness if requested
+        ta_kwargs = dict(
+            output_dir=args.out_dir,
+            num_train_epochs=args.epochs,
+            per_device_train_batch_size=args.batch_size,
+            per_device_eval_batch_size=(args.eval_batch_size if getattr(args, 'eval_batch_size', 0) and args.eval_batch_size > 0 else args.batch_size),
+            # some older HF versions don't accept evaluation_strategy kwarg; pass minimal set
+            save_strategy=args.evaluation_strategy,
+            evaluation_strategy=args.evaluation_strategy,
+            gradient_accumulation_steps=args.accumulation_steps,
+            learning_rate=args.lr,
+            fp16=args.fp16,
+            max_grad_norm=float(getattr(args, 'max_grad_norm', 1.0)),
+            logging_steps=10,
+            load_best_model_at_end=args.load_best_model_at_end,
+            save_total_limit=args.save_total_limit,
+        )
+        if args.metric_for_best_model:
+            ta_kwargs['metric_for_best_model'] = args.metric_for_best_model
+            ta_kwargs['greater_is_better'] = bool(args.metric_greater_is_better)
 
-            trainer_kwargs = dict(model=model, args=training_args, train_dataset=train_ds, eval_dataset=val_ds)
-            print('DEBUG: Trainer kwargs prepared (model, training_args, train_dataset, eval_dataset)', flush=True)
-            if args.early_stopping_patience and args.early_stopping_patience > 0:
-                try:
-                    from transformers import EarlyStoppingCallback
-                    trainer_kwargs['callbacks'] = [EarlyStoppingCallback(early_stopping_patience=args.early_stopping_patience)]
-                except Exception:
-                    pass
+        print('DEBUG: Building TrainingArguments...', flush=True)
+        training_args = TrainingArguments(**ta_kwargs)
 
-            # optional compute_metrics (accuracy + macro F1) to choose best model by desired metric
-            def compute_metrics(eval_pred):
-                logits, labels = eval_pred
-                try:
-                    from sklearn.metrics import accuracy_score, f1_score
-                except Exception:
-                    return {}
-                preds = np.argmax(logits, axis=-1)
-                # respect IGNORE_INDEX
-                mask = labels != IGNORE_INDEX
-                if mask.ndim > 1:
-                    # sometimes labels come as shape (n,1)
-                    labels = labels.squeeze()
-                    mask = labels != IGNORE_INDEX
-                labels_f = labels[mask]
-                preds_f = preds[mask]
-                if labels_f.size == 0:
-                    return {}
-                acc = float(accuracy_score(labels_f, preds_f))
-                f1 = float(f1_score(labels_f, preds_f, average='macro', zero_division=0))
-                return { 'accuracy': acc, 'f1': f1, 'eval_accuracy': acc, 'eval_f1': f1 }
-
-            trainer_kwargs['compute_metrics'] = compute_metrics
-            print('DEBUG: Creating Trainer instance...', flush=True)
-            trainer = Trainer(**trainer_kwargs)
-            print('DEBUG: Trainer created. Calling trainer.train()...', flush=True)
-            trainer.train()
-            print('DEBUG: trainer.train() finished. Saving model...', flush=True)
-            trainer.save_model(args.out_dir)
-            # ensure tokenizer is saved into output directory for offline evaluation
+        trainer_kwargs = dict(model=model, args=training_args, train_dataset=train_ds, eval_dataset=val_ds)
+        print('DEBUG: Trainer kwargs prepared (model, training_args, train_dataset, eval_dataset)', flush=True)
+        if args.early_stopping_patience and args.early_stopping_patience > 0:
             try:
-                tokenizer.save_pretrained(args.out_dir)
+                from transformers import EarlyStoppingCallback
+                trainer_kwargs['callbacks'] = [EarlyStoppingCallback(early_stopping_patience=args.early_stopping_patience)]
             except Exception:
                 pass
-            print('Saved RoBERTa model to', args.out_dir)
-        except Exception as te:
-            print('HF Trainer not available or incompatible, falling back to simple_train.\n', te)
-            simple_train(model, train_ds, val_ds, device, args)
+
+        # optional compute_metrics (accuracy + macro F1) to choose best model by desired metric
+        def compute_metrics(eval_pred):
+            logits, labels = eval_pred
+            try:
+                from sklearn.metrics import accuracy_score, f1_score
+            except Exception:
+                return {}
+            preds = np.argmax(logits, axis=-1)
+            # respect IGNORE_INDEX
+            mask = labels != IGNORE_INDEX
+            if mask.ndim > 1:
+                # sometimes labels come as shape (n,1)
+                labels = labels.squeeze()
+                mask = labels != IGNORE_INDEX
+            labels_f = labels[mask]
+            preds_f = preds[mask]
+            if labels_f.size == 0:
+                return {}
+            acc = float(accuracy_score(labels_f, preds_f))
+            f1 = float(f1_score(labels_f, preds_f, average='macro', zero_division=0))
+            return {'accuracy': acc, 'f1': f1, 'eval_accuracy': acc, 'eval_f1': f1}
+
+        trainer_kwargs['compute_metrics'] = compute_metrics
+        print('DEBUG: Creating Trainer instance...', flush=True)
+        trainer = Trainer(**trainer_kwargs)
+        print('DEBUG: Trainer created. Calling trainer.train()...', flush=True)
+        trainer.train()
+        print('DEBUG: trainer.train() finished. Saving model...', flush=True)
+        trainer.save_model(args.out_dir)
+        # ensure tokenizer is saved into output directory for offline evaluation
+        try:
+            tokenizer.save_pretrained(args.out_dir)
+        except Exception:
+            pass
+        print('Saved RoBERTa model to', args.out_dir)
+    except Exception as te:
+        print('HF Trainer not available or incompatible, falling back to simple_train.\n', te)
+        simple_train(model, train_ds, val_ds, device, args)
 
     # If HF is not available at all, inform the user
     if not HF_AVAILABLE:

@@ -20,7 +20,19 @@ from serxai.data.iemocap_dataset import read_manifest, train_val_split
 from serxai.models.tokenizer_encoder import TokenizerEncoder
 from serxai.data.collators import TextCollator
 from serxai.models.text_head import instantiate_from_state_dict
-from serxai.data.labels import LABELS, canonicalize_label, map_to_4class_idx
+from serxai.data.labels import LABELS, canonicalize_label, map_to_4class_idx, id_to_label
+
+
+DISPLAY_LABELS_6 = {
+    "neu": "Neutral",
+    "hap": "Happy",
+    "ang": "Anger",
+    "sad": "Sad",
+    "exc": "Excited",
+    "fru": "Frustration",
+}
+
+FOUR_CLASS_LABELS = ["Neutral", "Happy/Excited", "Anger/Frustration", "Sad"]
 
 
 def evaluate(
@@ -81,15 +93,11 @@ def evaluate(
     # Evaluate either using HF model directory or the head + TokenizerEncoder path
     batch_size = 32
     if use_hf_model:
-        # chunk val_records and predict via HF model
         for i in range(0, len(val_records), batch_size):
             batch = val_records[i : i + batch_size]
             logits = predict_batch(batch)
             preds = logits.argmax(axis=-1)
-            labs = [ (tokenc.tokenizer(r.get('text','')) and canonicalize_label(r.get('label'))) if False else None for r in batch ]
-            # We need true labels as integer indices; use canonicalize_label from data.labels
-            from serxai.data.labels import canonicalize_label as _canonicalize
-            labs = [_canonicalize(r.get('label')) for r in batch]
+            labs = [canonicalize_label(r.get("label")) for r in batch]
             ys_true.extend(labs)
             ys_pred.extend(preds.tolist())
     else:
@@ -106,8 +114,8 @@ def evaluate(
             ys_true.extend(labels.tolist())
             ys_pred.extend(pred.tolist())
 
-    ys_true = np.array(ys_true)
-    ys_pred = np.array(ys_pred)
+    ys_true = np.array(ys_true, dtype=int)
+    ys_pred = np.array(ys_pred, dtype=int)
     mask = ys_true >= 0
     ys_true = ys_true[mask]
     ys_pred = ys_pred[mask]
@@ -115,45 +123,71 @@ def evaluate(
     if len(ys_true) == 0:
         raise RuntimeError("No labeled samples found in validation split")
 
-    wa = float(accuracy_score(ys_true, ys_pred))
-    ua = float(recall_score(ys_true, ys_pred, average="macro", zero_division=0))
-    uf1 = float(f1_score(ys_true, ys_pred, average="macro", zero_division=0))
-    wf1 = float(f1_score(ys_true, ys_pred, average="weighted", zero_division=0))
-    cm = confusion_matrix(ys_true, ys_pred)
+    def _label_name_from_idx(idx: int) -> str:
+        canonical = id_to_label(idx)
+        return DISPLAY_LABELS_6.get(canonical, canonical)
 
-    # Optionally map to 4-class scheme for inference/analysis
-    if map_to_4class:
-        # map predictions and truths
-        ys_true = np.array([map_to_4class_idx(int(x)) for x in ys_true])
-        ys_pred = np.array([map_to_4class_idx(int(x)) for x in ys_pred])
-        # filter unknowns again
-        mask2 = (ys_true >= 0) & (ys_pred >= 0)
-        ys_true = ys_true[mask2]
-        ys_pred = ys_pred[mask2]
+    def _compute_metrics(y_true: np.ndarray, y_pred: np.ndarray, label_indices, label_names):
+        metrics = {
+            "WA": float(accuracy_score(y_true, y_pred)),
+            "UA": float(recall_score(y_true, y_pred, average="macro", zero_division=0)),
+            "UF1": float(f1_score(y_true, y_pred, average="macro", zero_division=0)),
+            "WF1": float(f1_score(y_true, y_pred, average="weighted", zero_division=0)),
+        }
+        per_class = {}
+        for idx, name in zip(label_indices, label_names):
+            per_class[name] = {
+                "precision": float(precision_score(y_true, y_pred, labels=[idx], average="macro", zero_division=0)),
+                "recall": float(recall_score(y_true, y_pred, labels=[idx], average="macro", zero_division=0)),
+                "f1": float(f1_score(y_true, y_pred, labels=[idx], average="macro", zero_division=0)),
+            }
+        return metrics, per_class
 
-    n_classes = int(max(ys_true.max(), ys_pred.max()) + 1)
+    label_indices_6 = list(range(len(LABELS)))
+    label_names_6 = [_label_name_from_idx(i) for i in label_indices_6]
+    cm_6 = confusion_matrix(ys_true, ys_pred, labels=label_indices_6)
+    metrics_6, per_class_6 = _compute_metrics(ys_true, ys_pred, label_indices_6, label_names_6)
+
     if map_to_4class:
-        label_names = ["neu", "hap", "ang", "sad"]
+        ys_true_4 = np.array([map_to_4class_idx(int(x)) for x in ys_true], dtype=int)
+        ys_pred_4 = np.array([map_to_4class_idx(int(x)) for x in ys_pred], dtype=int)
+        mask2 = (ys_true_4 >= 0) & (ys_pred_4 >= 0)
+        ys_true_4 = ys_true_4[mask2]
+        ys_pred_4 = ys_pred_4[mask2]
+
+        if len(ys_true_4) == 0:
+            raise RuntimeError("No labeled samples remain after 4-class mapping")
+
+        label_indices_4 = list(range(len(FOUR_CLASS_LABELS)))
+        label_names_4 = FOUR_CLASS_LABELS
+        cm_4 = confusion_matrix(ys_true_4, ys_pred_4, labels=label_indices_4)
+        metrics_4, per_class_4 = _compute_metrics(ys_true_4, ys_pred_4, label_indices_4, label_names_4)
+
+        out = {
+            "n_samples": int(len(ys_true_4)),
+            **metrics_4,
+            "label_names": label_names_4,
+            "metrics": metrics_4,
+            "per_class": per_class_4,
+            "confusion_matrix": cm_4.tolist(),
+            "six_class": {
+                "n_samples": int(len(ys_true)),
+                **metrics_6,
+                "label_names": label_names_6,
+                "metrics": metrics_6,
+                "per_class": per_class_6,
+                "confusion_matrix": cm_6.tolist(),
+            },
+        }
     else:
-        label_names = LABELS[:n_classes]
-    per_class = {}
-    for c in range(n_classes):
-        cls_prec = float(precision_score(ys_true, ys_pred, labels=[c], average="macro", zero_division=0))
-        cls_rec = float(recall_score(ys_true, ys_pred, labels=[c], average="macro", zero_division=0))
-        cls_f1 = float(f1_score(ys_true, ys_pred, labels=[c], average="macro", zero_division=0))
-        name = label_names[c] if c < len(label_names) else str(c)
-        per_class[name] = {"precision": cls_prec, "recall": cls_rec, "f1": cls_f1}
-
-    out = {
-        "n_samples": int(len(ys_true)),
-        "WA": wa,
-        "UA": ua,
-        "UF1": uf1,
-        "WF1": wf1,
-        "per_class": per_class,
-        "label_names": label_names,
-        "confusion_matrix": cm.tolist(),
-    }
+        out = {
+            "n_samples": int(len(ys_true)),
+            **metrics_6,
+            "label_names": label_names_6,
+            "metrics": metrics_6,
+            "per_class": per_class_6,
+            "confusion_matrix": cm_6.tolist(),
+        }
 
     out_dir = Path(out_dir_p)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -163,71 +197,74 @@ def evaluate(
 
     print("Wrote evaluation report to", report_p)
     print(json.dumps(out, indent=2))
-    # optionally save a confusion matrix plot
+    # optionally save confusion matrix plots
     if save_confusion_plot:
         try:
-            # Prepare figure folder
             figs_dir = out_dir / 'figures'
             figs_dir.mkdir(parents=True, exist_ok=True)
-            # confusion matrix (paper-ready): use label names on ticks, no title/axis labels
-            # Modern paper-ready confusion matrix with colorbar on the right
             import matplotlib
+
             matplotlib.rcParams.update({
                 'font.size': 8,
                 'axes.titlesize': 8,
                 'axes.labelsize': 8,
             })
-            labels = label_names if 'label_names' in locals() else [str(i) for i in range(cm.shape[0])]
-            fig, ax = plt.subplots(figsize=(6, 6))
-            im = ax.imshow(cm, interpolation='nearest', cmap='Blues')
-            # ticks with label names
-            ax.set_xticks(range(len(labels)))
-            ax.set_yticks(range(len(labels)))
-            ax.set_xticklabels(labels, rotation=45, ha='right')
-            ax.set_yticklabels(labels)
-            # show counts
-            fmt = 'd'
-            thresh = cm.max() / 2.0
-            for i in range(cm.shape[0]):
-                for j in range(cm.shape[1]):
-                    color = 'white' if cm[i, j] > thresh else 'black'
-                    ax.text(j, i, format(cm[i, j], fmt), ha='center', va='center', color=color, fontsize=7)
-            # colorbar on the right showing range
-            cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-            cbar.ax.tick_params(labelsize=7)
-            # remove axis titles for paper-ready
-            ax.set_xlabel('')
-            ax.set_ylabel('')
-            fig.tight_layout()
-            png_p = figs_dir / 'confusion_matrix.png'
-            pdf_p = figs_dir / 'confusion_matrix.pdf'
-            fig.savefig(png_p, dpi=300, bbox_inches='tight')
-            fig.savefig(pdf_p, dpi=300, bbox_inches='tight')
-            plt.close(fig)
-            print('Saved confusion matrix plots to', png_p, pdf_p)
-            # Also save a per-class F1 bar chart (paper-ready)
-            # Horizontal per-class F1 bar chart (clean, paper-ready)
-            fig2, ax2 = plt.subplots(figsize=(6, 3))
-            classes = list(per_class.keys())
-            f1s = [per_class[c]['f1'] for c in classes]
-            y_pos = range(len(classes))
-            ax2.barh(y_pos, f1s, color='C0')
-            ax2.set_yticks(y_pos)
-            ax2.set_yticklabels(classes)
-            ax2.set_xlim(0, 1)
-            # remove axis titles
-            ax2.set_xlabel('')
-            ax2.set_ylabel('')
-            # show f1 value at end of bar
-            for i, v in enumerate(f1s):
-                ax2.text(v + 0.01, i, f"{v:.2f}", va='center', fontsize=7)
-            fig2.tight_layout()
-            png2 = figs_dir / 'per_class_f1.png'
-            pdf2 = figs_dir / 'per_class_f1.pdf'
-            fig2.savefig(png2, dpi=300, bbox_inches='tight')
-            fig2.savefig(pdf2, dpi=300, bbox_inches='tight')
-            plt.close(fig2)
-            print('Saved per-class F1 plots to', png2, pdf2)
+
+            def _save_confusion_artifacts(report: dict, suffix: str):
+                labels = report['label_names']
+                cm_arr = np.array(report['confusion_matrix'])
+                per_cls = report['per_class']
+                suffix_str = f"_{suffix}" if suffix else ""
+
+                fig, ax = plt.subplots(figsize=(6, 6))
+                im = ax.imshow(cm_arr, interpolation='nearest', cmap='Blues')
+                ax.set_xticks(range(len(labels)))
+                ax.set_yticks(range(len(labels)))
+                ax.set_xticklabels(labels, rotation=45, ha='right')
+                ax.set_yticklabels(labels)
+                fmt = 'd'
+                thresh = cm_arr.max() / 2.0 if cm_arr.size else 0
+                for i in range(cm_arr.shape[0]):
+                    for j in range(cm_arr.shape[1]):
+                        color = 'white' if cm_arr[i, j] > thresh else 'black'
+                        ax.text(j, i, format(cm_arr[i, j], fmt), ha='center', va='center', color=color, fontsize=7)
+                cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+                cbar.ax.tick_params(labelsize=7)
+                ax.set_xlabel('')
+                ax.set_ylabel('')
+                fig.tight_layout()
+                png_p = figs_dir / f'confusion_matrix{suffix_str}.png'
+                pdf_p = figs_dir / f'confusion_matrix{suffix_str}.pdf'
+                fig.savefig(png_p, dpi=300, bbox_inches='tight')
+                fig.savefig(pdf_p, dpi=300, bbox_inches='tight')
+                plt.close(fig)
+                print('Saved confusion matrix plots to', png_p, pdf_p)
+
+                fig2, ax2 = plt.subplots(figsize=(6, 3))
+                classes = list(per_cls.keys())
+                f1s = [per_cls[c]['f1'] for c in classes]
+                y_pos = range(len(classes))
+                ax2.barh(y_pos, f1s, color='C0')
+                ax2.set_yticks(y_pos)
+                ax2.set_yticklabels(classes)
+                ax2.set_xlim(0, 1)
+                ax2.set_xlabel('')
+                ax2.set_ylabel('')
+                for i, v in enumerate(f1s):
+                    ax2.text(v + 0.01, i, f"{v:.2f}", va='center', fontsize=7)
+                fig2.tight_layout()
+                png2 = figs_dir / f'per_class_f1{suffix_str}.png'
+                pdf2 = figs_dir / f'per_class_f1{suffix_str}.pdf'
+                fig2.savefig(png2, dpi=300, bbox_inches='tight')
+                fig2.savefig(pdf2, dpi=300, bbox_inches='tight')
+                plt.close(fig2)
+                print('Saved per-class F1 plots to', png2, pdf2)
+
+            if map_to_4class:
+                _save_confusion_artifacts(out, '4class')
+                _save_confusion_artifacts(out['six_class'], '6class')
+            else:
+                _save_confusion_artifacts(out, '')
         except Exception as e:
             print('Failed to save confusion matrix plot:', e)
 

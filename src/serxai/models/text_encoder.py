@@ -11,6 +11,7 @@ This implementation will try to import HuggingFace `transformers` and load
 an AutoModel; if not available it falls back to a lightweight nn.Embedding + TransformerEncoder placeholder.
 """
 
+from pathlib import Path
 from typing import Optional
 import torch
 import torch.nn as nn
@@ -22,7 +23,8 @@ class TextEncoder(nn.Module):
                  proj_dim: Optional[int] = 512,
                  pooling: str = "mean",  # 'mean' or 'cls'
                  freeze_backbone: bool = False,
-                 force_fallback: bool = False):
+                 force_fallback: bool = False,
+                 local_files_only: Optional[bool] = None):
         super().__init__()
         self.backbone_name = backbone
         self.pooling = pooling
@@ -37,7 +39,13 @@ class TextEncoder(nn.Module):
                 from transformers import AutoModel
 
                 self.use_hf = True
-                self.hf = AutoModel.from_pretrained(backbone)
+                kwargs = {}
+                if local_files_only is None:
+                    if Path(backbone).exists():
+                        kwargs["local_files_only"] = True
+                else:
+                    kwargs["local_files_only"] = local_files_only
+                self.hf = AutoModel.from_pretrained(backbone, **kwargs)
                 hidden_size = getattr(self.hf.config, "hidden_size", 768)
                 if freeze_backbone:
                     for p in self.hf.parameters():

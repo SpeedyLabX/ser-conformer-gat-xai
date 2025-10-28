@@ -40,7 +40,7 @@ class SimpleGATLayer(nn.Module):
             hj = h[j].unsqueeze(0)
             score = (hi * self.attn_l).sum(-1) + (hj * self.attn_r).sum(-1)  # (1,H)
             score = F.leaky_relu(score)
-            attn_scores.append(((i, j), score.squeeze(0).detach().cpu()))
+            attn_scores.append(((i, j), score.squeeze(0)))
 
         # build normalized attention per destination node for aggregation
         # collect per dest
@@ -60,7 +60,7 @@ class SimpleGATLayer(nn.Module):
             agg = (w * h_src).sum(0)  # (H, D)
             out[j] = agg
             # save attention
-            attn_export[j] = {"sources": idxs, "weights": weights}
+            attn_export[j] = {"sources": idxs, "weights": weights.detach().cpu()}
 
         out = out.view(N, self.heads * self.out_dim)
         out = F.elu(out)

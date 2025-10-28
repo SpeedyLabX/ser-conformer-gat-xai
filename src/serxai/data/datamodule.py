@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import random
 from pathlib import Path
+from pathlib import Path
 from typing import Dict, Optional, Sequence
 
 from torch.utils.data import DataLoader
@@ -25,6 +26,7 @@ class DataModule:
         self,
         manifest_path: str,
         tokenizer,
+        dataset_root: Optional[str] = None,
         batch_size: int = 16,
         num_workers: int = 4,
         split: Optional[Dict[str, float]] = None,
@@ -42,6 +44,7 @@ class DataModule:
         self.max_text_length = max_text_length
         self.max_audio_frames = max_audio_frames
         self.tokenizer = tokenizer if tokenizer is not None else SimpleTokenizer()
+        self.dataset_root = Path(dataset_root) if dataset_root is not None else None
 
         self._train_ds = None
         self._val_ds = None
@@ -75,9 +78,21 @@ class DataModule:
             val_records = records[n_train : n_train + n_val]
             test_records = records[n_train + n_val :]
 
-        self._train_ds = IEMOCAPMultimodalDataset(train_records, max_frames=self.max_audio_frames)
-        self._val_ds = IEMOCAPMultimodalDataset(val_records, max_frames=self.max_audio_frames)
-        self._test_ds = IEMOCAPMultimodalDataset(test_records, max_frames=self.max_audio_frames)
+        self._train_ds = IEMOCAPMultimodalDataset(
+            train_records,
+            root_path=self.dataset_root,
+            max_frames=self.max_audio_frames,
+        )
+        self._val_ds = IEMOCAPMultimodalDataset(
+            val_records,
+            root_path=self.dataset_root,
+            max_frames=self.max_audio_frames,
+        )
+        self._test_ds = IEMOCAPMultimodalDataset(
+            test_records,
+            root_path=self.dataset_root,
+            max_frames=self.max_audio_frames,
+        )
 
     def _dataloader(self, dataset, shuffle: bool = False):
         return DataLoader(

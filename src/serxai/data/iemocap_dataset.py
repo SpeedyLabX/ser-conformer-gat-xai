@@ -217,6 +217,7 @@ class IEMOCAPMultimodalDataset(Dataset):
     def __init__(
         self,
         records: Sequence[Dict],
+        root_path: Optional[Path] = None,
         target_sr: int = 16000,
         n_mels: int = 80,
         n_fft: int = 400,
@@ -225,6 +226,7 @@ class IEMOCAPMultimodalDataset(Dataset):
     ):
         super().__init__()
         self.records = [r for r in records if canonicalize_label(r.get("label")) != -1]
+        self.root_path = Path(root_path) if root_path is not None else None
         self.target_sr = target_sr
         self.n_mels = n_mels
         self.n_fft = n_fft
@@ -240,6 +242,26 @@ class IEMOCAPMultimodalDataset(Dataset):
     def __getitem__(self, idx: int) -> Dict:
         rec = self.records[idx]
         wav_path = Path(rec["wav"])
+        if not wav_path.is_absolute():
+            if not wav_path.exists() and self.root_path is not None:
+                candidates = []
+                candidates.append(self.root_path / wav_path)
+                wav_str = str(wav_path).replace("\\", "/").lstrip("./")
+                prefixes = ["data/", "IEMOCAP_dataset/"]
+                stripped = wav_str
+                updated = True
+                while updated:
+                    updated = False
+                    for pref in prefixes:
+                        if stripped.startswith(pref):
+                            stripped = stripped[len(pref):]
+                            updated = True
+                if stripped and stripped != wav_str:
+                    candidates.append(self.root_path / Path(stripped))
+                for cand in candidates:
+                    if cand.exists():
+                        wav_path = cand
+                        break
         audio, sr = _load_audio_segment(
             wav_path,
             float(rec.get("start", 0.0)),

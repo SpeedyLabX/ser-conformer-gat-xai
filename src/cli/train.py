@@ -178,6 +178,7 @@ def main() -> None:
     datamodule = DataModule(
         manifest_path=str(manifest_path),
         tokenizer=tokenizer,
+        dataset_root=data_cfg.get("root"),
         batch_size=int(trainer_cfg.get("batch_size", 16)),
         num_workers=int(data_cfg.get("num_workers", 4)),
         split=data_cfg.get("split"),

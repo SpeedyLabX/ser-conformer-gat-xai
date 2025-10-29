@@ -85,14 +85,24 @@ def evaluate(
     criterion: torch.nn.Module,
     device: torch.device,
     metric_names: list[str],
+    use_tqdm: bool = False,
 ) -> Dict[str, Any]:
     model.eval()
     total_loss = 0.0
     total_samples = 0
     preds_all = []
     labels_all = []
+    # Optional tqdm iterator for evaluation
+    iterator = loader
+    if use_tqdm:
+        try:
+            from tqdm.auto import tqdm as _tqdm  # type: ignore
+            iterator = _tqdm(loader, total=len(loader), desc="Eval", leave=False)
+        except Exception:
+            iterator = loader
+
     with torch.no_grad():
-        for batch in loader:
+        for batch in iterator:
             batch = batch_to_device(batch, device)
             labels = batch["labels"]
             outputs = model(batch)
@@ -141,6 +151,7 @@ def main() -> None:
     parser.add_argument("--config", type=str, required=True, help="Path to YAML config.")
     parser.add_argument("--dry-run", action="store_true", help="Run a single forward pass and exit.")
     parser.add_argument("--run-dir", type=str, help="Override output directory.")
+    parser.add_argument("--use_tqdm", action="store_true", help="Enable tqdm progress bars for train/eval loops.")
     args = parser.parse_args()
 
     cfg_path = Path(args.config).resolve()
@@ -241,6 +252,9 @@ def main() -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "config_resolved.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False))
 
+    # Determine tqdm usage: config or CLI flag
+    use_tqdm = bool(trainer_cfg.get("use_tqdm", False) or getattr(args, "use_tqdm", False))
+
     history = []
     for epoch in range(1, epochs + 1):
         model.train()
@@ -248,7 +262,16 @@ def main() -> None:
         total_samples = 0
         preds_all = []
         labels_all = []
-        for batch in train_loader:
+        # Optional tqdm for training iterator
+        train_iterator = train_loader
+        if use_tqdm:
+            try:
+                from tqdm.auto import tqdm  # type: ignore
+                train_iterator = tqdm(train_loader, total=len(train_loader), desc=f"Epoch {epoch}/{epochs}")
+            except Exception:
+                train_iterator = train_loader
+
+        for batch in train_iterator:
             batch = batch_to_device(batch, device)
             labels = batch["labels"]
             outputs = model(batch)
@@ -261,10 +284,17 @@ def main() -> None:
                 torch.nn.utils.clip_grad_norm_(params, float(grad_clip))
             optimizer.step()
 
-            total_loss += loss.item() * labels.size(0)
+            step_loss = float(loss.item())
+            total_loss += step_loss * labels.size(0)
             total_samples += labels.size(0)
             preds_all.append(logits.argmax(dim=-1).detach().cpu().numpy())
             labels_all.append(labels.detach().cpu().numpy())
+
+            if use_tqdm:
+                try:
+                    train_iterator.set_postfix({"loss": f"{step_loss:.4f}"})
+                except Exception:
+                    pass
 
         train_metrics = {
             "loss": total_loss / max(1, total_samples),
@@ -280,7 +310,7 @@ def main() -> None:
                 elif name == "cm":
                     train_metrics[name] = confusion_matrix(labels_np, preds_np).tolist()
 
-        val_metrics = evaluate(model, val_loader, criterion, device, metrics_list)
+        val_metrics = evaluate(model, val_loader, criterion, device, metrics_list, use_tqdm=use_tqdm)
         history.append({"epoch": epoch, "train": train_metrics, "val": val_metrics})
 
         if monitor_metric == "loss":

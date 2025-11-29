@@ -1,0 +1,61 @@
+# Text Branch Training Configuration for IEMOCAP
+# Based on literature review findings (RobinNet, TSIN, MMFA-RNN)
+# Target: 68-71% WA on text-only
+
+# Model settings
+model:
+  backbone: "roberta-base"  # Best: roberta-base (71.1% WA in RobinNet)
+  pooling: "attention"      # attention > cls > mean for SER
+  max_length: 128           # IEMOCAP utterances are short
+  dropout: 0.3              # Regularization (literature: 0.1-0.3)
+  freeze_backbone: false    # Fine-tune for best results
+
+# Training settings  
+training:
+  epochs: 30                # With early stopping
+  batch_size: 16            # Small batch for better generalization
+  learning_rate: 2e-5       # Standard for fine-tuning transformers
+  weight_decay: 0.01        # AdamW regularization
+  warmup_ratio: 0.1         # 10% warmup steps
+  grad_clip: 1.0            # Gradient clipping
+  
+# Regularization
+regularization:
+  dropout: 0.3              # Classifier dropout
+  label_smoothing: 0.1      # Prevents overconfidence
+  use_class_weights: true   # Handle class imbalance
+
+# Early stopping
+early_stopping:
+  patience: 5               # Stop after 5 epochs without improvement
+  monitor: "val_WA"         # Monitor weighted accuracy
+
+# Evaluation
+evaluation:
+  protocol: "LOSO"          # Leave-One-Session-Out (standard)
+  num_classes: 4            # neu, hap+exc, ang+fru, sad
+  metrics:
+    - "WA"                  # Weighted Accuracy (main metric)
+    - "UA"                  # Unweighted Accuracy (for comparison)
+    - "F1_macro"            # Macro F1 score
+    
+# Output
+output:
+  save_model: true
+  out_dir: "artifacts/text_branch"
+
+# Benchmark targets (from literature)
+benchmarks:
+  text_only:
+    RobinNet_2024: 71.1     # WA, RoBERTa
+    TSIN_2022: 68.7         # WA, GloVe+LSTM
+    ISSA_BiGRU_MHA_2024: 66.1  # WA, GloVe
+  multimodal:
+    TSIN_2022: 77.67        # WA
+    MMFA_RNN_2020: 77.2     # WA
+    
+# Notes on IEMOCAP protocol:
+# - 5 sessions, 10 speakers (1M + 1F per session)
+# - LOSO ensures speaker independence
+# - 4-class: neutral, happy(+excited), angry(+frustrated), sad
+# - Report both WA and UA for comparison with literature

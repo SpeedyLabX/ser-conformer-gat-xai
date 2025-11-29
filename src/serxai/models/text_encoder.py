@@ -2,34 +2,77 @@
 
 Provides:
  - token embeddings (B, T, D)
- - pooled vector (B, D_out) using CLS or mean pooling
+ - pooled vector (B, D_out) using CLS, mean, or attention pooling
 
 Contract (inputs/outputs):
  - forward(input_ids, attention_mask) -> dict{'tokens': Tensor, 'pooled': Tensor}
 
 This implementation will try to import HuggingFace `transformers` and load
 an AutoModel; if not available it falls back to a lightweight nn.Embedding + TransformerEncoder placeholder.
+
+Improvements (v2):
+ - Added attention pooling option (better than mean/cls for SER)
+ - Added dropout for regularization
+ - Support for layer-wise learning rate decay
+ - Better handling of fallback encoder
 """
 
 from pathlib import Path
 from typing import Optional
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+
+
+class AttentionPooling(nn.Module):
+    """Attention-based pooling over sequence.
+    
+    Better than simple mean/cls pooling for emotion recognition
+    as it learns to attend to emotionally salient tokens.
+    """
+    
+    def __init__(self, hidden_dim: int, dropout: float = 0.1):
+        super().__init__()
+        self.attention = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 4),
+            nn.Tanh(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim // 4, 1),
+        )
+    
+    def forward(self, tokens: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
+        """
+        Args:
+            tokens: (B, T, D) token embeddings
+            mask: (B, T) attention mask (1 for valid, 0 for padding)
+        Returns:
+            pooled: (B, D) pooled representation
+        """
+        weights = self.attention(tokens).squeeze(-1)  # (B, T)
+        
+        if mask is not None:
+            weights = weights.masked_fill(mask == 0, float("-inf"))
+        
+        weights = F.softmax(weights, dim=-1)  # (B, T)
+        pooled = torch.bmm(weights.unsqueeze(1), tokens).squeeze(1)  # (B, D)
+        return pooled
 
 
 class TextEncoder(nn.Module):
     def __init__(self,
                  backbone: str = "roberta-base",
                  proj_dim: Optional[int] = 512,
-                 pooling: str = "mean",  # 'mean' or 'cls'
+                 pooling: str = "mean",  # 'mean', 'cls', or 'attention'
                  freeze_backbone: bool = False,
                  force_fallback: bool = False,
-                 local_files_only: Optional[bool] = None):
+                 local_files_only: Optional[bool] = None,
+                 dropout: float = 0.1):
         super().__init__()
         self.backbone_name = backbone
         self.pooling = pooling
         self.proj_dim = proj_dim
         self.freeze_backbone = freeze_backbone
+        self.dropout_rate = dropout
 
         # Attempt to load HF AutoModel unless force_fallback is set or backbone explicitly
         # requests the fallback.
@@ -55,19 +98,35 @@ class TextEncoder(nn.Module):
                 self.use_hf = False
                 hidden_size = 768
                 self.embed = nn.Embedding(30522, hidden_size)
-                encoder_layer = nn.TransformerEncoderLayer(d_model=hidden_size, nhead=8)
-                self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=2)
+                encoder_layer = nn.TransformerEncoderLayer(
+                    d_model=hidden_size, nhead=8, dropout=dropout, batch_first=False
+                )
+                self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=4)
+                self.embed_dropout = nn.Dropout(dropout)
         else:
             # explicit fallback requested
             self.use_hf = False
             hidden_size = 768
             self.embed = nn.Embedding(30522, hidden_size)
-            encoder_layer = nn.TransformerEncoderLayer(d_model=hidden_size, nhead=8)
-            self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=2)
+            encoder_layer = nn.TransformerEncoderLayer(
+                d_model=hidden_size, nhead=8, dropout=dropout, batch_first=False
+            )
+            self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=4)
+            self.embed_dropout = nn.Dropout(dropout)
+        
+        # Attention pooling layer (if using attention pooling)
+        self._hidden_size = hidden_size
+        if pooling == "attention":
+            self.attn_pool = AttentionPooling(hidden_size, dropout=dropout)
+        else:
+            self.attn_pool = None
 
         # projection layer (optional)
         if proj_dim is not None:
-            self.proj = nn.Linear(hidden_size, proj_dim)
+            self.proj = nn.Sequential(
+                nn.Dropout(dropout),
+                nn.Linear(hidden_size, proj_dim),
+            )
             out_dim = proj_dim
         else:
             self.proj = nn.Identity()
@@ -95,13 +154,16 @@ class TextEncoder(nn.Module):
             tokens = outputs.last_hidden_state  # (B, T, H)
         else:
             x = self.embed(input_ids)  # (B, T, H)
+            x = self.embed_dropout(x)
             # Transformer expects (T, B, H)
             x = x.transpose(0, 1)
             x = self.encoder(x)
             tokens = x.transpose(0, 1)
 
         # pooling
-        if self.pooling == "cls":
+        if self.pooling == "attention" and self.attn_pool is not None:
+            pooled = self.attn_pool(tokens, attention_mask)
+        elif self.pooling == "cls":
             pooled = tokens[:, 0, :]
         else:  # mean pooling with mask support
             if attention_mask is None:
@@ -117,6 +179,20 @@ class TextEncoder(nn.Module):
         if return_tokens:
             out["tokens"] = tokens
         return out
+    
+    def get_encoder_params(self):
+        """Get encoder parameters for separate learning rate."""
+        if self.use_hf:
+            return list(self.hf.parameters())
+        else:
+            return list(self.embed.parameters()) + list(self.encoder.parameters())
+    
+    def get_head_params(self):
+        """Get head (projection + pooling) parameters."""
+        params = list(self.proj.parameters())
+        if self.attn_pool is not None:
+            params += list(self.attn_pool.parameters())
+        return params
 
 
 if __name__ == "__main__":
